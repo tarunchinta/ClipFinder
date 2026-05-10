@@ -1,0 +1,1383 @@
+"""Indexing service for managing indexed files in the database."""
+
+from datetime import datetime
+from typing import Optional
+from uuid import UUID
+import logging
+
+from sqlalchemy import select, and_, or_, func, desc, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert
+
+from app.models.indexed_file import IndexedFile, IndexingStatus
+from app.models.video_frame_embedding import VideoFrameEmbedding
+from app.observability import (
+    get_current_observation_id,
+    get_current_trace_id,
+    trace_index_file,
+    trace_vector_search,
+)
+from app.services.embedding import get_embedding_service
+from app.services.video_frame_indexing import get_blob_url_with_sas
+from app.services.vision_embedding import get_vision_embedding_service
+
+logger = logging.getLogger(__name__)
+
+
+class IndexingService:
+    """Service for managing indexed files in Supabase/PostgreSQL."""
+    
+    def __init__(self, session: AsyncSession):
+        """
+        Initialize the indexing service.
+        
+        Args:
+            session: SQLAlchemy async session
+        """
+        self.session = session
+    
+    async def save_files_for_indexing(
+        self,
+        user_id: UUID,
+        google_account_id: str,
+        folder_id: str,
+        files: list[dict],
+        generate_embeddings: bool = True,
+        generate_vision_embeddings: bool = True,
+        google_access_token: Optional[str] = None,
+    ) -> tuple[list[IndexedFile], list[dict]]:
+        """
+        Bulk insert/upsert files for indexing.
+        
+        Uses ON CONFLICT to handle re-indexing scenarios:
+        - New files are inserted with status='pending'
+        - Existing files are updated with status='pending' (reset for re-indexing)
+        
+        Args:
+            user_id: User UUID
+            google_account_id: Google account ID from OAuth
+            folder_id: Google Drive folder ID
+            files: List of file metadata dicts from GoogleDriveService
+            generate_embeddings: Whether to generate embeddings for filenames (default True)
+            generate_vision_embeddings: Whether to generate vision embeddings for thumbnails (default True)
+            google_access_token: Google OAuth token for fetching fresh thumbnail URLs
+        
+        Returns:
+            Tuple of (list of created/updated IndexedFile records, list of trace context dicts for videos).
+            video_trace_contexts[i] = {"trace_id", "parent_span_id"} for the i-th video in the batch (same order as videos in returned list).
+        """
+        if not files:
+            return [], []
+        
+        # Generate text embeddings for filenames in batch (fast, text-only API call)
+        filenames = [file["name"] for file in files]
+        embeddings: list[Optional[list[float]]] = [None] * len(files)
+        
+        if generate_embeddings:
+            embedding_service = get_embedding_service()
+            if embedding_service.is_configured:
+                logger.info(f"Generating text embeddings for {len(filenames)} filenames")
+                embeddings = await embedding_service.generate_embeddings_batch(filenames)
+            else:
+                logger.warning("Text embedding service not configured, skipping text embedding generation")
+        
+        # Resolve vision service once; per-file generation happens inside each span
+        vision_service = None
+        if generate_vision_embeddings and google_access_token:
+            vision_service = get_vision_embedding_service()
+            if not vision_service.is_configured:
+                logger.warning("Vision embedding service not configured, skipping vision embedding generation")
+                vision_service = None
+        elif generate_vision_embeddings and not google_access_token:
+            logger.warning("No Google access token provided, skipping vision embedding generation")
+        
+        # Per-file loop: each iteration opens a Langfuse span that captures
+        # real work (vision embedding download + CLIP API call for images).
+        values = []
+        vision_embeddings: list[Optional[list[float]]] = [None] * len(files)
+        video_trace_contexts: list[dict] = []
+        for i, file in enumerate(files):
+            file_type = file.get("mediaType", "image")
+            file_meta = {
+                "file_id": file.get("id", ""),
+                "filename": file.get("name", ""),
+                "index_in_batch": i,
+            }
+            with trace_index_file(file_type, metadata=file_meta):
+                # Generate vision embedding for THIS file inside the span
+                if vision_service:
+                    thumbnail_url = file.get("thumbnailUrl")
+                    if thumbnail_url:
+                        vision_embeddings[i] = await vision_service.generate_embedding(
+                            thumbnail_url,
+                            mode="image",
+                            drive_file_id=file["id"],
+                            google_access_token=google_access_token,
+                        )
+
+                # Parse modified_time if present
+                modified_time = None
+                if file.get("modifiedTime"):
+                    try:
+                        parsed_time = datetime.fromisoformat(
+                            file["modifiedTime"].replace("Z", "+00:00")
+                        )
+                        modified_time = parsed_time.replace(tzinfo=None)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not parse modifiedTime: {file.get('modifiedTime')}")
+                if file.get("mediaType") == "video":
+                    trace_id = get_current_trace_id()
+                    parent_span_id = get_current_observation_id()
+                    if trace_id and parent_span_id:
+                        video_trace_contexts.append({"trace_id": trace_id, "parent_span_id": parent_span_id})
+                values.append({
+                    "user_id": user_id,
+                    "google_account_id": google_account_id,
+                    "folder_id": folder_id,
+                    "drive_file_id": file["id"],
+                    "filename": file["name"],
+                    "mime_type": file["mimeType"],
+                    "file_type": file["mediaType"],
+                    "size_bytes": file["size"],
+                    "duration_seconds": file.get("durationSeconds"),
+                    "width": file.get("width"),
+                    "height": file.get("height"),
+                    "modified_time": modified_time,
+                    "thumbnail_url": file.get("thumbnailUrl"),
+                    "drive_url": file.get("driveUrl"),
+                    "indexing_status": IndexingStatus.PENDING.value,
+                    "error_message": None,
+                    "filename_embedding": embeddings[i],
+                    "vision_embedding": vision_embeddings[i],
+                    "vision_indexing_status": IndexingStatus.COMPLETED.value if vision_embeddings[i] else None,
+                    "vision_indexed_at": datetime.utcnow() if vision_embeddings[i] else None,
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
+                    "indexed_at": None,
+                })
+        
+        # Use PostgreSQL upsert (INSERT ... ON CONFLICT)
+        stmt = insert(IndexedFile).values(values)
+        
+        # On conflict, update to reset for re-indexing
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_user_drive_file",
+            set_={
+                "folder_id": stmt.excluded.folder_id,
+                "filename": stmt.excluded.filename,
+                "mime_type": stmt.excluded.mime_type,
+                "file_type": stmt.excluded.file_type,
+                "size_bytes": stmt.excluded.size_bytes,
+                "duration_seconds": stmt.excluded.duration_seconds,
+                "width": stmt.excluded.width,
+                "height": stmt.excluded.height,
+                "modified_time": stmt.excluded.modified_time,
+                "thumbnail_url": stmt.excluded.thumbnail_url,
+                "drive_url": stmt.excluded.drive_url,
+                "indexing_status": IndexingStatus.PENDING.value,
+                "error_message": None,
+                "filename_embedding": stmt.excluded.filename_embedding,
+                "vision_embedding": stmt.excluded.vision_embedding,
+                "vision_indexing_status": stmt.excluded.vision_indexing_status,
+                "vision_indexed_at": stmt.excluded.vision_indexed_at,
+                "updated_at": datetime.utcnow(),
+                "indexed_at": None,
+            }
+        ).returning(IndexedFile)
+        
+        result = await self.session.execute(stmt)
+        await self.session.commit()
+        indexed_files = list(result.scalars().all())
+        return indexed_files, video_trace_contexts
+    
+    async def update_indexing_status(
+        self,
+        file_id: UUID,
+        status: IndexingStatus,
+        error_message: Optional[str] = None
+    ) -> Optional[IndexedFile]:
+        """
+        Update the indexing status of a file.
+        
+        Args:
+            file_id: IndexedFile UUID
+            status: New indexing status
+            error_message: Optional error message (for failed status)
+        
+        Returns:
+            Updated IndexedFile or None if not found
+        """
+        stmt = select(IndexedFile).where(IndexedFile.id == file_id)
+        result = await self.session.execute(stmt)
+        indexed_file = result.scalar_one_or_none()
+        
+        if not indexed_file:
+            return None
+        
+        indexed_file.indexing_status = status.value
+        indexed_file.updated_at = datetime.utcnow()
+        
+        if error_message:
+            indexed_file.error_message = error_message
+        
+        if status == IndexingStatus.COMPLETED:
+            indexed_file.indexed_at = datetime.utcnow()
+            indexed_file.error_message = None
+        
+        await self.session.commit()
+        await self.session.refresh(indexed_file)
+        
+        return indexed_file
+    
+    async def get_files_by_folder(
+        self,
+        user_id: UUID,
+        folder_id: str
+    ) -> list[IndexedFile]:
+        """
+        Get all indexed files for a specific folder.
+        
+        Args:
+            user_id: User UUID
+            folder_id: Google Drive folder ID
+        
+        Returns:
+            List of IndexedFile records
+        """
+        stmt = select(IndexedFile).where(
+            and_(
+                IndexedFile.user_id == user_id,
+                IndexedFile.folder_id == folder_id
+            )
+        ).order_by(IndexedFile.filename)
+        
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+    
+    async def get_pending_files(
+        self,
+        user_id: UUID,
+        limit: int = 100
+    ) -> list[IndexedFile]:
+        """
+        Get files awaiting indexing for a user.
+        
+        Args:
+            user_id: User UUID
+            limit: Maximum number of files to return
+        
+        Returns:
+            List of IndexedFile records with pending status
+        """
+        stmt = select(IndexedFile).where(
+            and_(
+                IndexedFile.user_id == user_id,
+                IndexedFile.indexing_status == IndexingStatus.PENDING.value
+            )
+        ).order_by(IndexedFile.created_at).limit(limit)
+        
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+    
+    async def get_file_by_drive_id(
+        self,
+        user_id: UUID,
+        drive_file_id: str
+    ) -> Optional[IndexedFile]:
+        """
+        Get an indexed file by its Drive file ID.
+        
+        Args:
+            user_id: User UUID
+            drive_file_id: Google Drive file ID
+        
+        Returns:
+            IndexedFile or None if not found
+        """
+        stmt = select(IndexedFile).where(
+            and_(
+                IndexedFile.user_id == user_id,
+                IndexedFile.drive_file_id == drive_file_id
+            )
+        )
+        
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+    
+    async def get_indexing_stats(
+        self,
+        user_id: UUID,
+        folder_id: Optional[str] = None
+    ) -> dict:
+        """
+        Get indexing statistics for a user (optionally filtered by folder).
+        
+        Args:
+            user_id: User UUID
+            folder_id: Optional folder ID to filter by
+        
+        Returns:
+            Dict with counts by status
+        """
+        base_condition = IndexedFile.user_id == user_id
+        if folder_id:
+            base_condition = and_(base_condition, IndexedFile.folder_id == folder_id)
+        
+        stmt = select(IndexedFile).where(base_condition)
+        result = await self.session.execute(stmt)
+        files = list(result.scalars().all())
+        
+        stats = {
+            "total": len(files),
+            "pending": 0,
+            "processing": 0,
+            "completed": 0,
+            "failed": 0,
+        }
+        
+        for f in files:
+            if f.indexing_status in stats:
+                stats[f.indexing_status] += 1
+        
+        return stats
+    
+    @staticmethod
+    def _tokenize_query(query: str) -> list[str]:
+        """
+        Tokenize a search query into individual terms.
+        
+        Splits on whitespace and filters out empty strings.
+        
+        Args:
+            query: Raw search query string
+        
+        Returns:
+            List of non-empty search terms
+        """
+        if not query:
+            return []
+        return [term.strip() for term in query.split() if term.strip()]
+    
+    async def search_files(
+        self,
+        user_id: UUID,
+        query: str = "",
+        file_type: Optional[str] = None,
+        fuzzy: bool = False,
+        similarity_threshold: float = 0.3,
+        limit: int = 100
+    ) -> list[IndexedFile]:
+        """
+        Search indexed files by filename with multi-term matching and optional fuzzy search.
+        
+        Args:
+            user_id: User UUID
+            query: Search query (supports multiple space-separated terms)
+            file_type: Optional filter by file type ("video" or "image")
+            fuzzy: If True, use trigram similarity for typo-tolerant matching.
+                   If False (default), require exact substring matches.
+            similarity_threshold: Minimum similarity score for fuzzy matches (0.0-1.0).
+                                  Only used when fuzzy=True. Default is 0.3.
+            limit: Maximum number of results to return
+        
+        Returns:
+            List of matching IndexedFile records, ordered by relevance (similarity score)
+        """
+        conditions = [IndexedFile.user_id == user_id]
+        
+        # Tokenize the query into individual terms
+        tokens = self._tokenize_query(query)
+        
+        # Add file type filter if provided
+        if file_type and file_type in ("video", "image"):
+            conditions.append(IndexedFile.file_type == file_type)
+        
+        # Build the search conditions based on mode
+        if tokens:
+            if fuzzy:
+                # Fuzzy mode: use trigram similarity for each token
+                # All tokens must have similarity above threshold
+                for token in tokens:
+                    # Use the % operator which checks if similarity > pg_trgm.similarity_threshold
+                    # We use a raw text expression for the similarity check
+                    conditions.append(
+                        text(f"similarity(filename, :token_{tokens.index(token)}) > :threshold")
+                        .bindparams(**{f"token_{tokens.index(token)}": token, "threshold": similarity_threshold})
+                    )
+            else:
+                # Exact mode: require all tokens to match via ILIKE (substring match)
+                for token in tokens:
+                    conditions.append(IndexedFile.filename.ilike(f"%{token}%"))
+        
+        # Calculate similarity score for ranking
+        # Use the full query for overall similarity scoring
+        if query:
+            similarity_score = func.similarity(IndexedFile.filename, query)
+            stmt = select(IndexedFile, similarity_score.label("score")).where(
+                and_(*conditions)
+            ).order_by(desc("score"), IndexedFile.filename).limit(limit)
+        else:
+            # No query - just return all files ordered by filename
+            stmt = select(IndexedFile).where(
+                and_(*conditions)
+            ).order_by(IndexedFile.filename).limit(limit)
+        
+        result = await self.session.execute(stmt)
+        
+        # Extract just the IndexedFile objects (not the score tuples)
+        if query:
+            return [row[0] for row in result.all()]
+        else:
+            return list(result.scalars().all())
+    
+    async def search_files_with_scores(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 100,
+        min_similarity: float = 0.01
+    ) -> list[tuple[IndexedFile, float]]:
+        """
+        Search indexed files by filename and return results with similarity scores.
+        
+        Uses trigram similarity for scoring without requiring exact substring matches.
+        This method is designed for use in hybrid search where scores need to be 
+        combined with other search methods.
+        
+        Args:
+            user_id: User UUID
+            query: Search query (required for scoring)
+            file_type: Optional filter by file type ("video" or "image")
+            limit: Maximum number of results to return
+            min_similarity: Minimum trigram similarity score (default 0.05, very lenient)
+        
+        Returns:
+            List of tuples (IndexedFile, similarity_score), ordered by score descending
+        """
+        if not query or not query.strip():
+            return []
+        
+        conditions = [IndexedFile.user_id == user_id]
+        
+        # Add file type filter if provided
+        if file_type and file_type in ("video", "image"):
+            conditions.append(IndexedFile.file_type == file_type)
+        
+        # Calculate similarity score for ranking using trigram similarity
+        similarity_score = func.similarity(IndexedFile.filename, query)
+        
+        # Only require minimum similarity threshold (very lenient for hybrid search)
+        # This allows semantic search to contribute even when text match is weak
+        conditions.append(similarity_score >= min_similarity)
+        
+        stmt = select(IndexedFile, similarity_score.label("score")).where(
+            and_(*conditions)
+        ).order_by(desc("score"), IndexedFile.filename).limit(limit)
+        
+        result = await self.session.execute(stmt)
+        rows = result.all()
+        
+        # Return tuples of (file, score)
+        return [(row[0], float(row[1])) for row in rows]
+    
+    async def get_files_without_embeddings(
+        self,
+        user_id: Optional[UUID] = None,
+        limit: int = 100
+    ) -> list[IndexedFile]:
+        """
+        Get files that don't have filename embeddings yet.
+        
+        Args:
+            user_id: Optional user UUID to filter by (if None, gets all users)
+            limit: Maximum number of files to return
+        
+        Returns:
+            List of IndexedFile records without embeddings
+        """
+        conditions = [IndexedFile.filename_embedding.is_(None)]
+        
+        if user_id:
+            conditions.append(IndexedFile.user_id == user_id)
+        
+        stmt = select(IndexedFile).where(
+            and_(*conditions)
+        ).order_by(IndexedFile.created_at).limit(limit)
+        
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+    
+    async def generate_missing_embeddings(
+        self,
+        user_id: Optional[UUID] = None,
+        batch_size: int = 100
+    ) -> dict:
+        """
+        Generate embeddings for files that don't have them yet.
+        
+        Args:
+            user_id: Optional user UUID to filter by (if None, processes all users)
+            batch_size: Number of files to process in each batch
+        
+        Returns:
+            Dict with processing statistics
+        """
+        embedding_service = get_embedding_service()
+        
+        if not embedding_service.is_configured:
+            logger.warning("Embedding service not configured")
+            return {
+                "success": False,
+                "error": "Embedding service not configured",
+                "processed": 0,
+                "failed": 0,
+            }
+        
+        stats = {
+            "success": True,
+            "processed": 0,
+            "failed": 0,
+            "total_found": 0,
+        }
+        
+        # Get files without embeddings
+        files = await self.get_files_without_embeddings(user_id, limit=batch_size)
+        stats["total_found"] = len(files)
+        
+        if not files:
+            logger.info("No files found without embeddings")
+            return stats
+        
+        # Extract filenames
+        filenames = [f.filename for f in files]
+        
+        # Generate embeddings in batch
+        logger.info(f"Generating embeddings for {len(filenames)} files")
+        embeddings = await embedding_service.generate_embeddings_batch(filenames)
+        
+        # Update files with their embeddings
+        for i, file in enumerate(files):
+            embedding = embeddings[i]
+            if embedding:
+                file.filename_embedding = embedding
+                file.updated_at = datetime.utcnow()
+                stats["processed"] += 1
+            else:
+                stats["failed"] += 1
+                logger.warning(f"Failed to generate embedding for file: {file.filename}")
+        
+        await self.session.commit()
+        
+        logger.info(
+            f"Embedding generation complete: {stats['processed']} processed, "
+            f"{stats['failed']} failed"
+        )
+        
+        return stats
+    
+    async def semantic_search(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 20,
+        similarity_threshold: float = 0.0
+    ) -> list[tuple[IndexedFile, float]]:
+        """
+        Search indexed files using semantic similarity on filename embeddings.
+        
+        Uses cosine similarity to find files with semantically similar filenames
+        to the search query.
+        
+        Args:
+            user_id: User UUID
+            query: Search query text
+            file_type: Optional filter by file type ("video" or "image")
+            limit: Maximum number of results to return
+            similarity_threshold: Minimum similarity score (0.0-1.0, where 1.0 is identical)
+        
+        Returns:
+            List of tuples (IndexedFile, similarity_score), ordered by similarity descending
+        """
+        if not query or not query.strip():
+            return []
+        
+        # Generate embedding for the query
+        embedding_service = get_embedding_service()
+        
+        if not embedding_service.is_configured:
+            logger.warning("Embedding service not configured for semantic search")
+            return []
+        
+        query_embedding = await embedding_service.generate_embedding(query)
+        
+        if not query_embedding:
+            logger.warning(f"Failed to generate embedding for query: {query}")
+            return []
+        
+        # Build conditions
+        conditions = [
+            IndexedFile.user_id == user_id,
+            IndexedFile.filename_embedding.isnot(None),
+        ]
+        
+        if file_type and file_type in ("video", "image"):
+            conditions.append(IndexedFile.file_type == file_type)
+        
+        # Use cosine distance for similarity search
+        # pgvector uses <=> for cosine distance (lower is more similar)
+        # We convert to similarity score: 1 - distance
+        cosine_distance = IndexedFile.filename_embedding.cosine_distance(query_embedding)
+        similarity_score = (1 - cosine_distance).label("similarity")
+        
+        stmt = select(IndexedFile, similarity_score).where(
+            and_(*conditions)
+        ).order_by(cosine_distance).limit(limit)
+
+        with trace_vector_search("semantic_filename_search", metadata={"limit": limit}):
+            result = await self.session.execute(stmt)
+            rows = result.all()
+
+        # Filter by similarity threshold and return results
+        results = []
+        for row in rows:
+            file, score = row
+            if score >= similarity_threshold:
+                results.append((file, float(score)))
+
+        return results
+
+    @staticmethod
+    def _normalize_scores(scores: list[float]) -> list[float]:
+        """
+        Normalize scores to 0-1 range using min-max normalization.
+        
+        Args:
+            scores: List of raw scores
+            
+        Returns:
+            List of normalized scores (0-1 range)
+        """
+        if not scores:
+            return []
+        
+        min_score = min(scores)
+        max_score = max(scores)
+        
+        # If all scores are the same, return 1.0 for all
+        if max_score == min_score:
+            return [1.0] * len(scores)
+        
+        return [(s - min_score) / (max_score - min_score) for s in scores]
+    
+    async def hybrid_search(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 50,
+        text_weight: float = 0.7,
+        semantic_weight: float = 0.3
+    ) -> list[tuple[IndexedFile, float, float, float]]:
+        """
+        Perform hybrid search combining text-based and semantic search with reranking.
+        
+        Uses weighted score fusion to combine results from:
+        - Text search (trigram similarity on filename)
+        - Semantic search (cosine similarity on embeddings)
+        
+        Formula: hybrid_score = text_weight * normalized_text_score + semantic_weight * normalized_semantic_score
+        
+        Args:
+            user_id: User UUID
+            query: Search query text
+            file_type: Optional filter by file type ("video" or "image")
+            limit: Maximum number of results to return
+            text_weight: Weight for text search scores (default 0.7)
+            semantic_weight: Weight for semantic search scores (default 0.3)
+        
+        Returns:
+            List of tuples (IndexedFile, text_score, semantic_score, hybrid_score),
+            ordered by hybrid_score descending (highest to lowest)
+        """
+        if not query or not query.strip():
+            return []
+        
+        # Run both searches in parallel conceptually, but sequentially for simplicity
+        # Fetch more results than needed since we'll merge and re-rank
+        fetch_limit = limit * 2
+        
+        # Get text search results with scores
+        text_results = await self.search_files_with_scores(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit
+        )
+        
+        # Get semantic search results with scores
+        semantic_results = await self.semantic_search(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
+            similarity_threshold=0.0  # Get all results, we'll filter later
+        )
+        
+        # Create lookup dictionaries by file ID
+        text_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
+            f.id: (f, score) for f, score in text_results
+        }
+        semantic_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
+            f.id: (f, score) for f, score in semantic_results
+        }
+        
+        # Get all unique file IDs
+        all_file_ids = set(text_scores_by_id.keys()) | set(semantic_scores_by_id.keys())
+        
+        if not all_file_ids:
+            return []
+        
+        # Collect raw scores for normalization
+        text_raw_scores = [score for _, score in text_results] if text_results else [0.0]
+        semantic_raw_scores = [score for _, score in semantic_results] if semantic_results else [0.0]
+        
+        # Calculate min/max for normalization
+        text_min = min(text_raw_scores) if text_raw_scores else 0.0
+        text_max = max(text_raw_scores) if text_raw_scores else 1.0
+        semantic_min = min(semantic_raw_scores) if semantic_raw_scores else 0.0
+        semantic_max = max(semantic_raw_scores) if semantic_raw_scores else 1.0
+        
+        def normalize_text(score: float) -> float:
+            if text_max == text_min:
+                return 1.0 if text_results else 0.0
+            return (score - text_min) / (text_max - text_min)
+        
+        def normalize_semantic(score: float) -> float:
+            if semantic_max == semantic_min:
+                return 1.0 if semantic_results else 0.0
+            return (score - semantic_min) / (semantic_max - semantic_min)
+        
+        # Build combined results
+        combined_results: list[tuple[IndexedFile, float, float, float]] = []
+        
+        for file_id in all_file_ids:
+            # Get file object (prefer text result, fallback to semantic)
+            if file_id in text_scores_by_id:
+                file, text_score = text_scores_by_id[file_id]
+            else:
+                file, _ = semantic_scores_by_id[file_id]
+                text_score = 0.0
+            
+            # Get semantic score (0 if not found)
+            if file_id in semantic_scores_by_id:
+                _, semantic_score = semantic_scores_by_id[file_id]
+            else:
+                semantic_score = 0.0
+            
+            # Normalize scores
+            norm_text = normalize_text(text_score) if text_score > 0 else 0.0
+            norm_semantic = normalize_semantic(semantic_score) if semantic_score > 0 else 0.0
+            
+            # Calculate hybrid score
+            hybrid_score = (text_weight * norm_text) + (semantic_weight * norm_semantic)
+            
+            combined_results.append((file, norm_text, norm_semantic, hybrid_score))
+        
+        # Sort by hybrid score descending (highest to lowest)
+        combined_results.sort(key=lambda x: x[3], reverse=True)
+        
+        # Return top N results
+        return combined_results[:limit]
+    
+    # ==========================================================================
+    # Vision Embedding Methods
+    # ==========================================================================
+    
+    async def get_files_without_vision_embeddings(
+        self,
+        user_id: Optional[UUID] = None,
+        limit: int = 100
+    ) -> list[IndexedFile]:
+        """
+        Get files that don't have vision embeddings yet but have thumbnails.
+        
+        Args:
+            user_id: Optional user UUID to filter by (if None, gets all users)
+            limit: Maximum number of files to return
+        
+        Returns:
+            List of IndexedFile records without vision embeddings
+        """
+        conditions = [
+            IndexedFile.vision_embedding.is_(None),
+            IndexedFile.thumbnail_url.isnot(None),
+        ]
+        
+        if user_id:
+            conditions.append(IndexedFile.user_id == user_id)
+        
+        stmt = select(IndexedFile).where(
+            and_(*conditions)
+        ).order_by(IndexedFile.created_at).limit(limit)
+        
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+    
+    async def update_vision_indexing_status(
+        self,
+        file_id: UUID,
+        status: IndexingStatus,
+        error_message: Optional[str] = None
+    ) -> Optional[IndexedFile]:
+        """
+        Update the vision indexing status of a file.
+        
+        Args:
+            file_id: IndexedFile UUID
+            status: New vision indexing status
+            error_message: Optional error message (for failed status)
+        
+        Returns:
+            Updated IndexedFile or None if not found
+        """
+        stmt = select(IndexedFile).where(IndexedFile.id == file_id)
+        result = await self.session.execute(stmt)
+        indexed_file = result.scalar_one_or_none()
+        
+        if not indexed_file:
+            return None
+        
+        indexed_file.vision_indexing_status = status.value
+        indexed_file.updated_at = datetime.utcnow()
+        
+        if error_message:
+            # Store error in the main error_message field with prefix
+            if indexed_file.error_message:
+                indexed_file.error_message = f"{indexed_file.error_message}\nVision: {error_message}"
+            else:
+                indexed_file.error_message = f"Vision: {error_message}"
+        
+        if status == IndexingStatus.COMPLETED:
+            indexed_file.vision_indexed_at = datetime.utcnow()
+        
+        await self.session.commit()
+        await self.session.refresh(indexed_file)
+        
+        return indexed_file
+    
+    async def generate_missing_vision_embeddings(
+        self,
+        user_id: Optional[UUID] = None,
+        google_access_token: Optional[str] = None,
+        batch_size: int = 50
+    ) -> dict:
+        """
+        Generate vision embeddings for files that don't have them yet.
+        
+        Args:
+            user_id: Optional user UUID to filter by (if None, processes all users)
+            google_access_token: Optional Google OAuth token for fetching fresh thumbnail URLs
+            batch_size: Number of files to process in each batch (smaller due to image downloads)
+        
+        Returns:
+            Dict with processing statistics
+        """
+        vision_service = get_vision_embedding_service()
+        
+        if not vision_service.is_configured:
+            logger.warning("Vision embedding service not configured")
+            return {
+                "success": False,
+                "error": "Vision embedding service not configured",
+                "processed": 0,
+                "failed": 0,
+            }
+        
+        stats = {
+            "success": True,
+            "processed": 0,
+            "failed": 0,
+            "total_found": 0,
+        }
+        
+        # Get files without vision embeddings
+        files = await self.get_files_without_vision_embeddings(user_id, limit=batch_size)
+        stats["total_found"] = len(files)
+        
+        if not files:
+            logger.info("No files found without vision embeddings")
+            return stats
+        
+        # Extract thumbnail URLs and Drive file IDs
+        thumbnail_urls = [f.thumbnail_url for f in files]
+        drive_file_ids = [f.drive_file_id for f in files]
+        
+        # Generate vision embeddings in batch (with fresh thumbnail URLs if token provided)
+        logger.info(f"Generating vision embeddings for {len(thumbnail_urls)} files")
+        embeddings = await vision_service.generate_embeddings_batch(
+            thumbnail_urls,
+            drive_file_ids=drive_file_ids,
+            google_access_token=google_access_token
+        )
+        
+        # Update files with their embeddings
+        for i, file in enumerate(files):
+            embedding = embeddings[i]
+            if embedding:
+                file.vision_embedding = embedding
+                file.vision_indexing_status = IndexingStatus.COMPLETED.value
+                file.vision_indexed_at = datetime.utcnow()
+                file.updated_at = datetime.utcnow()
+                stats["processed"] += 1
+            else:
+                file.vision_indexing_status = IndexingStatus.FAILED.value
+                file.updated_at = datetime.utcnow()
+                stats["failed"] += 1
+                logger.warning(f"Failed to generate vision embedding for file: {file.filename}")
+        
+        await self.session.commit()
+        
+        logger.info(
+            f"Vision embedding generation complete: {stats['processed']} processed, "
+            f"{stats['failed']} failed"
+        )
+        
+        return stats
+    
+    async def vision_semantic_search(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 20,
+        similarity_threshold: float = 0.0
+    ) -> list[tuple[IndexedFile, float]]:
+        """
+        Search indexed files using vision semantic similarity on vision embeddings.
+        
+        Uses cosine similarity to find files with visually similar thumbnails
+        to the query (converted to embedding via CLIP text encoder).
+        
+        Args:
+            user_id: User UUID
+            query: Search query text (will be converted to CLIP embedding)
+            file_type: Optional filter by file type ("video" or "image")
+            limit: Maximum number of results to return
+            similarity_threshold: Minimum similarity score (0.0-1.0, where 1.0 is identical)
+        
+        Returns:
+            List of tuples (IndexedFile, similarity_score), ordered by similarity descending
+        """
+        if not query or not query.strip():
+            return []
+        
+        # Generate vision embedding for the query
+        vision_service = get_vision_embedding_service()
+        
+        if not vision_service.is_configured:
+            logger.warning("Vision embedding service not configured for vision search")
+            return []
+        
+        # For CLIP, we use the text encoder to search images
+        # This generates a text embedding that can be compared with image embeddings
+        query_embedding = await vision_service.generate_text_embedding(query)
+        
+        if not query_embedding:
+            logger.warning(f"Failed to generate vision embedding for query: {query}")
+            return []
+        
+        return await self.vision_semantic_search_by_embedding(
+            user_id=user_id,
+            query_embedding=query_embedding,
+            file_type=file_type,
+            limit=limit,
+            similarity_threshold=similarity_threshold
+        )
+    
+    async def vision_semantic_search_by_embedding(
+        self,
+        user_id: UUID,
+        query_embedding: list[float],
+        file_type: Optional[str] = None,
+        limit: int = 20,
+        similarity_threshold: float = 0.0
+    ) -> list[tuple[IndexedFile, float]]:
+        """
+        Search indexed files using a pre-computed vision embedding.
+        
+        Args:
+            user_id: User UUID
+            query_embedding: Pre-computed CLIP embedding vector
+            file_type: Optional filter by file type ("video" or "image")
+            limit: Maximum number of results to return
+            similarity_threshold: Minimum similarity score (0.0-1.0)
+        
+        Returns:
+            List of tuples (IndexedFile, similarity_score), ordered by similarity descending
+        """
+        # Build conditions
+        conditions = [
+            IndexedFile.user_id == user_id,
+            IndexedFile.vision_embedding.isnot(None),
+        ]
+        
+        if file_type and file_type in ("video", "image"):
+            conditions.append(IndexedFile.file_type == file_type)
+        
+        # Use cosine distance for similarity search
+        # pgvector uses <=> for cosine distance (lower is more similar)
+        # We convert to similarity score: 1 - distance
+        cosine_distance = IndexedFile.vision_embedding.cosine_distance(query_embedding)
+        similarity_score = (1 - cosine_distance).label("similarity")
+        
+        stmt = select(IndexedFile, similarity_score).where(
+            and_(*conditions)
+        ).order_by(cosine_distance).limit(limit)
+
+        with trace_vector_search("vision_semantic_search", metadata={"limit": limit}):
+            result = await self.session.execute(stmt)
+            rows = result.all()
+
+        # Filter by similarity threshold and return results
+        results = []
+        for row in rows:
+            file, score = row
+            if score >= similarity_threshold:
+                results.append((file, float(score)))
+
+        return results
+
+    async def _vision_search_video_frames(
+        self,
+        user_id: UUID,
+        query_embedding: list[float],
+        file_type: Optional[str] = None,
+        limit: int = 20,
+        similarity_threshold: float = 0.0,
+    ) -> list[tuple[IndexedFile, "VideoFrameEmbedding", float]]:
+        """
+        Search video_frame_embeddings by query embedding; join to indexed_files.
+        Returns (IndexedFile, VideoFrameEmbedding, similarity_score).
+        """
+        conditions = [IndexedFile.user_id == user_id]
+        if file_type and file_type in ("video", "image"):
+            conditions.append(IndexedFile.file_type == file_type)
+        cosine_distance = VideoFrameEmbedding.embedding.cosine_distance(query_embedding)
+        similarity_score = (1 - cosine_distance).label("similarity")
+        stmt = (
+            select(IndexedFile, VideoFrameEmbedding, similarity_score)
+            .select_from(VideoFrameEmbedding)
+            .join(IndexedFile, IndexedFile.id == VideoFrameEmbedding.video_id)
+            .where(and_(*conditions))
+            .order_by(cosine_distance)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        rows = result.all()
+        out = []
+        for row in rows:
+            file, frame, score = row
+            if score >= similarity_threshold:
+                out.append((file, frame, float(score)))
+        return out
+
+    async def vision_semantic_search_unified(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 20,
+        similarity_threshold: float = 0.0,
+    ) -> list[tuple[IndexedFile, float, Optional[dict]]]:
+        """
+        Vision search over both indexed_files.vision_embedding and video_frame_embeddings.
+        Returns list of (IndexedFile, similarity_score, matched_frame | None).
+        matched_frame = { "frameImageUrl", "timeSeconds", "frameIndex" } when hit is a video frame.
+        """
+        vision_service = get_vision_embedding_service()
+        if not vision_service.is_configured:
+            return []
+        query_embedding = await vision_service.generate_text_embedding(query)
+        if not query_embedding:
+            return []
+
+        file_results = await self.vision_semantic_search_by_embedding(
+            user_id=user_id,
+            query_embedding=query_embedding,
+            file_type=file_type,
+            limit=limit * 2,
+            similarity_threshold=similarity_threshold,
+        )
+        frame_results = await self._vision_search_video_frames(
+            user_id=user_id,
+            query_embedding=query_embedding,
+            file_type=file_type,
+            limit=limit * 2,
+            similarity_threshold=similarity_threshold,
+        )
+
+        by_file_id: dict[UUID, tuple[IndexedFile, float, Optional[dict]]] = {}
+        for f, score in file_results:
+            by_file_id[f.id] = (f, score, None)
+        for f, frame, score in frame_results:
+            if f.id not in by_file_id or score > by_file_id[f.id][1]:
+                by_file_id[f.id] = (
+                    f,
+                    score,
+                    {
+                        "frameImageUrl": get_blob_url_with_sas(frame.frame_image_url) if frame.frame_image_url else frame.frame_image_url,
+                        "timeSeconds": frame.time_seconds,
+                        "frameIndex": frame.frame_index,
+                    },
+                )
+
+        merged = list(by_file_id.values())
+        merged.sort(key=lambda x: x[1], reverse=True)
+        return merged[:limit]
+
+    async def vision_hybrid_search(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 50,
+        text_weight: float = 0.5,
+        vision_weight: float = 0.5
+    ) -> list[tuple[IndexedFile, float, float, float]]:
+        """
+        Perform hybrid search combining text-based and vision semantic search.
+        
+        Uses weighted score fusion to combine results from:
+        - Text search (trigram similarity on filename)
+        - Vision search (cosine similarity on CLIP embeddings)
+        
+        Formula: hybrid_score = text_weight * normalized_text_score + vision_weight * normalized_vision_score
+        
+        Args:
+            user_id: User UUID
+            query: Search query text
+            file_type: Optional filter by file type ("video" or "image")
+            limit: Maximum number of results to return
+            text_weight: Weight for text search scores (default 0.5)
+            vision_weight: Weight for vision search scores (default 0.5)
+        
+        Returns:
+            List of tuples (IndexedFile, text_score, vision_score, hybrid_score),
+            ordered by hybrid_score descending
+        """
+        if not query or not query.strip():
+            return []
+        
+        # Fetch more results than needed since we'll merge and re-rank
+        fetch_limit = limit * 2
+        
+        # Get text search results with scores
+        text_results = await self.search_files_with_scores(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit
+        )
+        
+        # Get vision search results with scores
+        vision_results = await self.vision_semantic_search(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
+            similarity_threshold=0.0
+        )
+        
+        # Create lookup dictionaries by file ID
+        text_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
+            f.id: (f, score) for f, score in text_results
+        }
+        vision_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
+            f.id: (f, score) for f, score in vision_results
+        }
+        
+        # Get all unique file IDs
+        all_file_ids = set(text_scores_by_id.keys()) | set(vision_scores_by_id.keys())
+        
+        if not all_file_ids:
+            return []
+        
+        # Collect raw scores for normalization
+        text_raw_scores = [score for _, score in text_results] if text_results else [0.0]
+        vision_raw_scores = [score for _, score in vision_results] if vision_results else [0.0]
+        
+        # Calculate min/max for normalization
+        text_min = min(text_raw_scores) if text_raw_scores else 0.0
+        text_max = max(text_raw_scores) if text_raw_scores else 1.0
+        vision_min = min(vision_raw_scores) if vision_raw_scores else 0.0
+        vision_max = max(vision_raw_scores) if vision_raw_scores else 1.0
+        
+        def normalize_text(score: float) -> float:
+            if text_max == text_min:
+                return 1.0 if text_results else 0.0
+            return (score - text_min) / (text_max - text_min)
+        
+        def normalize_vision(score: float) -> float:
+            if vision_max == vision_min:
+                return 1.0 if vision_results else 0.0
+            return (score - vision_min) / (vision_max - vision_min)
+        
+        # Build combined results
+        combined_results: list[tuple[IndexedFile, float, float, float]] = []
+        
+        for file_id in all_file_ids:
+            # Get file object (prefer text result, fallback to vision)
+            if file_id in text_scores_by_id:
+                file, text_score = text_scores_by_id[file_id]
+            else:
+                file, _ = vision_scores_by_id[file_id]
+                text_score = 0.0
+            
+            # Get vision score (0 if not found)
+            if file_id in vision_scores_by_id:
+                _, vision_score = vision_scores_by_id[file_id]
+            else:
+                vision_score = 0.0
+            
+            # Normalize scores
+            norm_text = normalize_text(text_score) if text_score > 0 else 0.0
+            norm_vision = normalize_vision(vision_score) if vision_score > 0 else 0.0
+            
+            # Calculate hybrid score
+            hybrid_score = (text_weight * norm_text) + (vision_weight * norm_vision)
+            
+            combined_results.append((file, norm_text, norm_vision, hybrid_score))
+        
+        # Sort by hybrid score descending
+        combined_results.sort(key=lambda x: x[3], reverse=True)
+        
+        # Return top N results
+        return combined_results[:limit]
+
+    async def vision_hybrid_search_unified(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 50,
+        text_weight: float = 0.5,
+        vision_weight: float = 0.5,
+    ) -> list[tuple[IndexedFile, float, float, float, Optional[dict]]]:
+        """
+        Hybrid search (text + vision) with unified vision (files + video frames).
+        Returns (IndexedFile, text_score, vision_score, hybrid_score, matched_frame | None).
+        matched_frame = { "frameImageUrl", "timeSeconds", "frameIndex" } for video frame hits.
+        """
+        if not query or not query.strip():
+            return []
+        fetch_limit = limit * 2
+        text_results = await self.search_files_with_scores(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
+        )
+        vision_results = await self.vision_semantic_search_unified(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
+            similarity_threshold=0.0,
+        )
+        text_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
+            f.id: (f, score) for f, score in text_results
+        }
+        vision_by_id: dict[UUID, tuple[IndexedFile, float, Optional[dict]]] = {
+            f.id: (f, score, mf) for f, score, mf in vision_results
+        }
+        all_file_ids = set(text_scores_by_id.keys()) | set(vision_by_id.keys())
+        if not all_file_ids:
+            return []
+
+        text_raw = [s for _, s in text_results] if text_results else [0.0]
+        vision_raw = [v[1] for v in vision_results] if vision_results else [0.0]
+        text_min = min(text_raw) if text_raw else 0.0
+        text_max = max(text_raw) if text_raw else 1.0
+        vision_min = min(vision_raw) if vision_raw else 0.0
+        vision_max = max(vision_raw) if vision_raw else 1.0
+
+        def norm_text(s: float) -> float:
+            if text_max == text_min:
+                return 1.0 if text_results else 0.0
+            return (s - text_min) / (text_max - text_min)
+
+        def norm_vision(s: float) -> float:
+            if vision_max == vision_min:
+                return 1.0 if vision_results else 0.0
+            return (s - vision_min) / (vision_max - vision_min)
+
+        combined: list[tuple[IndexedFile, float, float, float, Optional[dict]]] = []
+        for file_id in all_file_ids:
+            if file_id in text_scores_by_id:
+                file, text_score = text_scores_by_id[file_id]
+            else:
+                file, _, _ = vision_by_id[file_id]
+                text_score = 0.0
+            if file_id in vision_by_id:
+                _, vision_score, matched_frame = vision_by_id[file_id]
+            else:
+                vision_score = 0.0
+                matched_frame = None
+            norm_t = norm_text(text_score) if text_score > 0 else 0.0
+            norm_v = norm_vision(vision_score) if vision_score > 0 else 0.0
+            hybrid = (text_weight * norm_t) + (vision_weight * norm_v)
+            combined.append((file, norm_t, norm_v, hybrid, matched_frame))
+        combined.sort(key=lambda x: x[3], reverse=True)
+        return combined[:limit]
+
+    async def get_vision_indexing_stats(
+        self,
+        user_id: UUID,
+        folder_id: Optional[str] = None
+    ) -> dict:
+        """
+        Get vision indexing statistics for a user (optionally filtered by folder).
+        
+        Args:
+            user_id: User UUID
+            folder_id: Optional folder ID to filter by
+        
+        Returns:
+            Dict with counts by vision indexing status
+        """
+        base_condition = IndexedFile.user_id == user_id
+        if folder_id:
+            base_condition = and_(base_condition, IndexedFile.folder_id == folder_id)
+        
+        stmt = select(IndexedFile).where(base_condition)
+        result = await self.session.execute(stmt)
+        files = list(result.scalars().all())
+        
+        stats = {
+            "total": len(files),
+            "with_thumbnail": 0,
+            "pending": 0,
+            "processing": 0,
+            "completed": 0,
+            "failed": 0,
+            "not_started": 0,
+        }
+        
+        for f in files:
+            if f.thumbnail_url:
+                stats["with_thumbnail"] += 1
+            
+            if f.vision_indexing_status is None:
+                stats["not_started"] += 1
+            elif f.vision_indexing_status == IndexingStatus.PENDING.value:
+                stats["pending"] += 1
+            elif f.vision_indexing_status == IndexingStatus.PROCESSING.value:
+                stats["processing"] += 1
+            elif f.vision_indexing_status == IndexingStatus.COMPLETED.value:
+                stats["completed"] += 1
+            elif f.vision_indexing_status == IndexingStatus.FAILED.value:
+                stats["failed"] += 1
+        
+        return stats

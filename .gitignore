@@ -1,0 +1,52 @@
+# Environment variables
+.env
+.env.*
+*.env
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# Database files
+*.db
+*.sqlite3
+
+# IDE settings (optional but recommended)
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Testing/linting caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+Agent.md
+TODO.md
+
+Start.md
+
+docs/

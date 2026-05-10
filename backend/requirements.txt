@@ -1,0 +1,49 @@
+# FastAPI & Server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.9
+
+# Authentication
+fastapi-users[sqlalchemy,oauth]==13.0.0
+httpx-oauth==0.13.0
+
+# Database
+sqlalchemy[asyncio]==2.0.25
+asyncpg==0.29.0
+alembic==1.13.1
+pgvector==0.2.4
+
+# Google APIs
+google-api-python-client==2.111.0
+google-auth==2.26.1
+
+# Configuration
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# Templates
+jinja2==3.1.3
+
+# Security
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+
+# Analytics (optional)
+posthog==3.3.1
+
+# Observability - tracing embeddings and retrieval (optional)
+langfuse>=3.0.0
+
+# Redis/Celery (optional, for async jobs)
+celery[redis]==5.3.6
+redis==5.0.1
+
+# Video frame extraction & storage
+supabase==2.3.0
+# httpx: keep >=0.18,<0.25 for httpx-oauth 0.13.0; supabase works with this range
+httpx>=0.18,<0.25
+azure-storage-blob>=12.19.0
+azure-servicebus>=7.13.0
+
+
+
