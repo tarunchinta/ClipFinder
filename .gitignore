@@ -46,7 +46,71 @@ Thumbs.db
 
 Agent.md
 TODO.md
-
+Google OAuth Setup Steps.md
 Start.md
-
 docs/
+
+# Credentials / keys
+client_secret*.json
+credentials.json
+token.json
+service-account*.json
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.envrc
+
+# ML / embedding artifacts
+*.pkl
+*.pickle
+*.pt
+*.bin
+*.safetensors
+*.onnx
+*.npy
+*.npz
+models/
+.cache/
+.huggingface/
+
+# Celery
+celerybeat-schedule*
+celerybeat.pid
+
+# Local data / temp
+uploads/
+downloads/
+tmp/
+temp/
+data/
+frames/
+
+# Docker local overrides
+docker-compose.override.yml
+docker-compose.*.local.yml
+
+# Frontend (future-proofing)
+node_modules/
+.next/
+.nuxt/
+out/
+coverage/
+.parcel-cache/
+
+# DB backups
+*.dump
+*.sql.bak
+*.dmp
+
+# Patch / backup leftovers
+*.orig
+*.rej
+*.bak
+
+# Tool caches not already covered
+.ruff_cache/
+.pyright/
+.python-version
+.tool-versions

@@ -1,359 +1,214 @@
-# ClipFinder-MVP
+# ClipFinder
 
-<p align="left">
-  <strong>Built for creators who are tired of scrubbing through footage.</strong>
-</p>
+**Semantic search for video clips and images. Find a shot in seconds instead of scrubbing through hours of footage.**
 
-> **Semantic video clip search for creators** — find that 3-second shot of a "red scooter at night in the rain" without scrubbing through hundreds of files.
-
-
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/your-org/clipfinder-mvp)
-[![Python](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-gray.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg?logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Postgres + pgvector](https://img.shields.io/badge/Postgres-pgvector-336791.svg?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
+[![License: MIT](https://img.shields.io/badge/license-MIT-gray.svg)](LICENSE.txt)
 
 ---
 
-## 🎯 Problem
+## The Problem
 
-YouTube, TikTok, and small-studio creators store tens of thousands of video clips in Google Drive. Google Drive search is **title-only**, so finding a specific shot means manually scrubbing through hundreds of files. ClipFinder indexes your clips with AI-powered visual and transcript search.
+Content creators accumulate thousands of clips and images, usually in Google Drive. Drive search can't see what's inside a video or image so finding "the shot of a red scooter pulling away at night" means scrubbing through folders by hand.
 
-## ✨ MVP Features
+ClipFinder makes a media library searchable by content. Point it at a Drive folder; it indexes every image and video frame, and a plain-text query like `red car` returns the matching files and frame timestamps.
 
-| # | Feature | Est. Time |
-|---|---------|-----------|
-| 1 | Google OAuth read-only Drive scope | 1 h |
-| 2 | Folder picker + file-list scan | 3 h |
-| 3 | Hard validator: reject >30 s or >100 MB per file | 2 h |
-| 4 | FFmpeg-wasm 1 fps key-frame extractor (browser/Lambda) | 1 d |
-| 5 | CLIP ViT-B/32 512-dim embedding generator | 0.5 d |
-| 6 | pgvector table + insert API | 0.5 d |
-| 7 | Hybrid search endpoint: dense vector + BM25 filename | 1 d |
-| 8 | Web search UI: input box + ranked grid of key-frames | 1 d |
-| 9 | Click → 30 s scrub-able preview + "Open in Drive" link | 0.5 d |
-| 10 | Whisper-tiny transcript → sentence embedding → text search tab | 1 d |
-| 11 | Usage counter: 50 searches, then soft $5 pay-wall (email only) | 0.5 d |
-| 12 | Progress bar + error badge for corrupt/too-long clips | 0.5 d |
-| 13 | Basic analytics event stream (search, click, pay-wall view) | 0.5 d |
-| 14 | Landing page + wait-list gate before OAuth | 0.5 d |
+## Demo
 
-**Total estimated build time: ~3 weeks**
+<video src="https://github.com/tarunchinta/ClipFinder/raw/main/clipfinder-demo.mp4" controls width="100%"></video>
+
+> If the player above doesn't load, [watch the demo here](https://github.com/tarunchinta/ClipFinder/raw/main/clipfinder-demo.mp4).
 
 ---
 
-## 🏗️ Architecture
+## How It Works
+
+ClipFinder is a single **FastAPI** service. After a user signs in with Google (read-only Drive scope) and picks a folder, indexing and search run through one pipeline:
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Browser       │     │   FastAPI        │     │   Postgres 15   │
-│                 │     │                  │     │   + pgvector    │
-│  - Google OAuth │────▶│  - /api/embed    │────▶│                 │
-│  - FFmpeg-wasm  │     │  - /api/search   │     │  - embeddings   │
-│  - File picker  │◀────│  - /api/index    │◀────│  - metadata     │
-│  - Search UI    │     │                  │     │  - BM25 index   │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                               │
-                               ▼
-                        ┌──────────────────┐
-                        │   Celery + Redis │
-                        │   (async jobs)   │
-                        │                  │
-                        │  - CLIP embed    │
-                        │  - Whisper STT   │
-                        └──────────────────┘
+                          ┌──────────────────────────────────────────────┐
+   Google OAuth           │                 FastAPI app                   │
+   (drive.readonly)       │                                               │
+        │                 │  Jinja UI ── /dashboard (picker) ── /search   │
+        ▼                 │                     │                         │
+   ┌──────────┐  list/    │   ┌─────────────────┴──────────────────┐      │
+   │  Google  │  download │   │            Indexing                │      │
+   │  Drive   │◀──────────┼──▶│  • upsert file metadata            │      │
+   └──────────┘           │   │  • CLIP embed thumbnails (images)  │      │
+        ▲                 │   │  • ffmpeg → frames → CLIP embed    │──┐   │
+        │ frames stored   │   │  • text-embed filenames            │  │   │
+        │                 │   └────────────────────────────────────┘  │   │
+   ┌──────────┐           │   ┌────────────────────────────────────┐  │   │
+   │  Blob     │◀─────────┼───│            Search                  │  │   │
+   │  storage  │  frame    │   │  query ─┬─ pg_trgm (filenames)     │  │   │
+   │ (Azure/   │  JPEGs    │   │         └─ CLIP text→image (visual)│  │   │
+   │  Supabase)│           │   │     fuse → ranked frames + files   │  │   │
+   └──────────┘           │   └────────────────────────────────────┘  │   │
+                          │                     │                      │   │
+                          └─────────────────────┼──────────────────────┼───┘
+                                                 ▼                      ▼
+                                       ┌───────────────────────────────────┐
+                                       │   Postgres 16 + pgvector          │
+                                       │   • indexed_files                 │
+                                       │       filename_embedding  (1536)  │
+                                       │       vision_embedding    (768)   │
+                                       │   • video_frame_embeddings (768)  │
+                                       │   HNSW (cosine) + pg_trgm GIN     │
+                                       └───────────────────────────────────┘
 ```
 
-## 🛠️ Tech Stack
+### Indexing Pipeline
 
-| Layer | Technology | Notes |
-|-------|------------|-------|
-| **Backend** | FastAPI (Python 3.11+) | Async, auto OpenAPI docs |
-| **Database** | PostgreSQL 15 + pgvector | Portable to Supabase, Neon, RDS |
-| **Auth** | fastapi-users + Google OAuth2 | JWT cookies + bearer tokens |
-| **Queue** | Celery + Redis | Offload heavy GPU/CPU jobs |
-| **ML - Vision** | CLIP ViT-B/32 (open-clip) | 512-dim embeddings |
-| **ML - Audio** | Whisper-tiny | Transcription → sentence embeddings |
-| **Video** | FFmpeg-wasm | Browser-side 1 fps frame extraction |
-| **Analytics** | PostHog | Event tracking |
-| **Payments** | Stripe (test mode) | Email capture only for MVP |
+1. **List & validate** files in the selected folder via the Drive API (images + videos, ≤100 MB, videos ≤30 s).
+2. **Images:** download the Drive thumbnail and embed it with CLIP → a 768-dim `vision_embedding`.
+3. **Videos:** download the file, run **ffmpeg** server-side to sample frames (every 5th frame), embed each frame with CLIP, and store per-frame embeddings with their **timestamp** so search can deep-link into the exact moment. Frame JPEGs are persisted to blob storage (Azure Blob preferred, Supabase Storage as fallback).
+4. **Filenames** are embedded with `text-embedding-3-small` and stored alongside metadata.
+5. Heavy video work is offloaded to an **in-process `asyncio` background task** so the index request returns quickly.
+
+### Retrieval
+
+The shipped search path is **hybrid**: it fuses a lexical signal over filenames with a dense visual signal over image/frame embeddings.
+
+- **Lexical leg** — Postgres `pg_trgm` trigram similarity on filenames.
+- **Visual leg** — the query text is embedded with **CLIP's text encoder** and compared (cosine) against image and video-frame embeddings via **pgvector**. Because CLIP maps text and images into a *shared* vector space, a text query can be matched directly against pixels.
+- **Fusion** — each leg's scores are min-max normalized and combined with a weighted sum, then re-ranked. Video matches surface the specific frame and its timestamp.
 
 ---
 
-## 📦 Installation
+## Key Engineering Decisions & Tradeoffs
+
+**CLIP for cross-modal retrieval.** CLIP embeds images and text into one shared space, so a text query can be compared directly to image embeddings via similarity search, with no captioning or object-detection step in between.
+
+**Hybrid retrieval, without a semantic filename leg.** The pipeline can embed filenames semantically and an endpoint for it exists, but in testing filenames were already lexically close to their content and CLIP visual retrieval surfaced the same results. The shipped search therefore fuses lexical filename matching (`pg_trgm`) with CLIP visual search, keeping the cheap signal cheap and spending the expensive signal on pixels.
+
+**Postgres + pgvector instead of a dedicated vector DB.** One datastore holds metadata, lexical indexes (`pg_trgm` GIN), and vector indexes (HNSW, cosine). This removes a moving part, keeps writes transactional, and stays portable to any managed Postgres (Supabase, Neon, RDS).
+
+**Hosted embedding endpoints instead of local model weights.** Both encoders are called over HTTP — `text-embedding-3-small` via Azure OpenAI (1536-dim) and OpenAI's CLIP hosted on Azure ML (768-dim). This keeps the app container small and CPU-only and lets the model deployment scale independently. The tradeoff is per-call latency and a dependency on endpoint availability, which the indexing layer absorbs by running asynchronously.
+
+**Frame sampling over full decode.** Sampling every 5th frame keeps embedding volume and storage proportional to motion while still capturing distinct moments. Each frame keeps its computed timestamp so results jump straight to the moment in Drive.
+
+**In-process async over a message broker.** Video indexing runs as an `asyncio` background task, so the index request returns immediately with no Redis/Celery to operate. An Azure Service Bus producer path is in place, so the work can move to an external worker without reshaping the API.
+
+---
+
+## Tech Stack
+
+| Layer | Choice | Notes |
+|---|---|---|
+| API | FastAPI (Python 3.11) | Async, auto OpenAPI docs at `/docs` |
+| UI | Server-rendered Jinja2 | Landing, dashboard (Drive picker), search |
+| Auth | fastapi-users + Google OAuth2 | `drive.readonly` scope, JWT cookie session |
+| Database | PostgreSQL 16 + pgvector | HNSW (cosine) vector indexes + `pg_trgm` GIN |
+| Text embeddings | Azure OpenAI `text-embedding-3-small` | 1536-dim, over HTTP |
+| Visual embeddings | OpenAI CLIP on Azure ML | 768-dim image & text encoders, shared space |
+| Video | ffmpeg / ffprobe (subprocess) | Frame sampling + timestamps |
+| Frame storage | Azure Blob / Supabase | SAS-signed frame image URLs |
+| Async | `asyncio` background tasks | Service Bus producer path available |
+| Observability | Langfuse | Traces embedding + retrieval calls |
+| Migrations | Alembic | `vector` + `pg_trgm` extensions, table DDL |
+
+---
+
+## Scope and Limitations
+
+- Search is lexical (filenames) + CLIP visual; transcript/audio search is not implemented.
+- Video frame indexing requires `ffmpeg` on the host and configured Azure embedding/blob credentials.
+- `indexing_status` reflects enqueue, not end-to-end per-file completion.
+- Stripe and usage-limit fields exist in config and schema but are not enforced.
+
+---
+
+## Running Locally
 
 ### Prerequisites
 
 - Python 3.11+
-- PostgreSQL 15 with pgvector extension
-- Redis (for Celery queue, optional for MVP)
+- PostgreSQL 16 with the `vector` and `pg_trgm` extensions (or use the included `docker-compose.yml`)
+- `ffmpeg` / `ffprobe` on your `PATH` (required for video frame indexing)
+- Google Cloud OAuth credentials (Drive API enabled)
+- Azure OpenAI + Azure ML CLIP endpoints for embeddings
 
-### 1. Clone & Setup
+### Setup
 
 ```bash
-git clone https://github.com/your-org/clipfinder-mvp.git
-cd clipfinder-mvp
+git clone <your-repo-url>
+cd ClipFinder-MVP/backend
 
-# Navigate to backend
-cd backend
-
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: .\venv\Scripts\activate  # Windows
+# Windows: .\venv\Scripts\activate
+source venv/bin/activate
 
-# Install dependencies
 pip install -r requirements.txt
+
+cp env.template .env   # then fill in the values below
 ```
 
-### 2. Database Setup
-
-```bash
-# Start PostgreSQL and enable pgvector
-psql -U postgres -c "CREATE DATABASE clipfinder;"
-psql -U postgres -d clipfinder -c "CREATE EXTENSION vector;"
-```
-
-### 3. Google OAuth Setup
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-2. Create a new project or select existing
-3. Enable the **Google Drive API**
-4. Create **OAuth 2.0 Client ID** (Web application)
-5. Add authorized redirect URI: `http://localhost:8000/auth/google/callback`
-6. Copy the Client ID and Client Secret
-
-### 4. Environment Variables
-
-Copy the template and fill in your values:
-
-```bash
-cp env.template .env
-```
-
-Edit `.env`:
+Minimum `.env` values:
 
 ```env
-# Database (use asyncpg driver)
 DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/clipfinder
+JWT_SECRET=run-`openssl rand -hex 32`
 
-# JWT Secret - generate with: openssl rand -hex 32
-JWT_SECRET=your-random-256-bit-secret-here
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_API_KEY=...                       # for the Drive folder picker
 
-# Google OAuth (from step 3)
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-client-secret
+AZURE_OPENAI_ENDPOINT_SAMPLE_FULL=...    # full text-embedding endpoint URL
+AZURE_OPENAI_API_KEY=...
+AZURE_AI_VISION_ENDPOINT=...             # Azure ML CLIP /score endpoint
+AZURE_AI_VISION_KEY=...
 
-# App URLs
-APP_URL=http://localhost:8000
-FRONTEND_URL=http://localhost:3000
+# One of the following for frame image storage:
+AZURE_BLOB_CONNECTION_STRING=...         # preferred
+# SUPABASE_URL / SUPABASE_KEY            # fallback
 ```
 
-### 5. Run Migrations
+### Database & Server
 
 ```bash
-# Generate initial migration
-alembic revision --autogenerate -m "initial"
+# Option A: bring up Postgres + the app together
+docker compose up --build
 
-# Apply migrations
+# Option B: local Postgres + Alembic
 alembic upgrade head
+python run.py        # or: uvicorn app.main:app --reload --port 8000
 ```
 
-### 6. Start the Server
+Then open:
 
-```bash
-# Option 1: Using the run script
-python run.py
+- App: http://localhost:8000
+- API docs: http://localhost:8000/docs
+- Health: http://localhost:8000/health
 
-# Option 2: Using uvicorn directly
-uvicorn app.main:app --reload --port 8000
-```
-
-### 7. Access the App
-
-- **Landing Page:** http://localhost:8000
-- **API Docs:** http://localhost:8000/docs
-- **Health Check:** http://localhost:8000/health
-
-### Optional: ffmpeg (for video search by timestamp)
-
-Video frame indexing (search by moment inside videos) uses **ffmpeg** to extract frames. If ffmpeg is not installed or not on your PATH, frame indexing will fail and the `video_frame_embeddings` table will stay empty.
-
-- **Windows:** Install [ffmpeg](https://ffmpeg.org/download.html) (e.g. via [winget](https://winget.run/pkg/Gyan/FFmpeg) or [chocolatey](https://chocolatey.org/packages/ffmpeg)) and add the `bin` folder to your system PATH.
-- **macOS:** `brew install ffmpeg`
-- **Linux:** `apt install ffmpeg` or your distro’s package manager.
-
-### Optional: Celery Worker (for ML jobs)
-
-```bash
-# In a separate terminal
-celery -A app.worker worker --loglevel=info
-```
+> Note: the default `Dockerfile` does not install `ffmpeg`; add it to the image if you index videos in a container.
 
 ---
 
-## 🔌 API Reference
-
-### `POST /api/embed`
-
-Index a new video clip.
-
-**Request Body:**
-```json
-{
-  "fileId": "google-drive-file-id",
-  "userId": "uuid",
-  "frames": ["base64-jpeg-1", "base64-jpeg-2", "..."],
-  "audioBase64": "base64-aac-audio",
-  "filename": "red_scooter.mp4"
-}
-```
-
-**Response:** `201 Created`
-```json
-{
-  "clipId": "uuid"
-}
-```
-
-### `GET /api/search`
-
-Search indexed clips.
-
-**Query Parameters:**
-| Param | Type | Required | Description |
-|-------|------|----------|-------------|
-| `query` | string | ✅ | Search query |
-| `mode` | enum | ✅ | `visual` or `transcript` |
-| `userId` | uuid | ✅ | User identifier |
-
-**Response:** `200 OK`
-```json
-{
-  "results": [
-    {
-      "clipId": "uuid",
-      "fileId": "google-drive-file-id",
-      "driveUrl": "https://drive.google.com/file/d/...",
-      "keyFrameUrl": "https://storage.example.com/frame.jpg",
-      "timeOffset": 12.5,
-      "score": 0.847
-    }
-  ]
-}
-```
-
-### `DELETE /api/index`
-
-Remove all embeddings for a user.
-
-**Query Parameters:**
-| Param | Type | Required | Description |
-|-------|------|----------|-------------|
-| `userId` | uuid | ✅ | User identifier |
-
-**Response:** `204 No Content`
-
----
-
-## 🚀 User Flow
+## Repository Layout
 
 ```
-1. Landing Page → CTA "Start Indexing"
-          ↓
-2. Google OAuth (read-only Drive scope)
-          ↓
-3. Google Picker → Select ONE folder
-          ↓
-4. File validation (reject >30s or >100MB)
-          ↓
-5. Click "Index N clips" → Progress bar
-          ↓
-6. Processing per clip:
-   ├─ FFmpeg → 1 fps frames → CLIP embedding
-   ├─ Whisper → transcript → sentence embedding
-   └─ Filename → BM25 index
-          ↓
-7. Auto-redirect to /search
-          ↓
-8. Search: Visual tab | Transcript tab
-          ↓
-9. Results: Grid of key-frames ranked by score
-          ↓
-10. Click → 30s preview modal + "Open in Drive"
-          ↓
-11. After 50 searches → $5/mo paywall (email capture)
+backend/
+├── app/
+│   ├── main.py                 # FastAPI app factory + routers
+│   ├── config.py               # pydantic-settings configuration
+│   ├── routers/                # auth, pages (Jinja), drive/search API
+│   ├── services/
+│   │   ├── embedding.py            # Azure OpenAI text embeddings (1536-d)
+│   │   ├── vision_embedding.py     # Azure ML CLIP image/text embeddings (768-d)
+│   │   ├── video_frame_indexing.py # ffmpeg frame extraction + embedding
+│   │   ├── indexing.py             # search: trigram + vector + hybrid fusion
+│   │   └── google_drive.py         # Drive listing / download
+│   ├── templates/              # landing / dashboard / search UIs
+│   └── observability/          # Langfuse tracing
+├── alembic/                    # migrations (vector + pg_trgm)
+└── requirements.txt
+docker-compose.yml              # app + pgvector/pgvector:pg16
 ```
 
 ---
 
-## 📊 Limits
+## License
 
-| Constraint | Limit |
-|------------|-------|
-| Clips per folder | 100 |
-| Duration per clip | 30 seconds |
-| File size per clip | 100 MB |
-| Storage per user | 500 MB |
-| Free searches | 50 |
-
----
-
-## 🔒 Security & Privacy
-
-- **OAuth Scope:** `drive.readonly` only — we never modify your files
-- **No Raw Storage:** Frames discarded after embedding; audio discarded after transcript
-- **Anonymized Data:** Embeddings are mathematical vectors with no personal data
-- **Randomized IDs:** Clip IDs are UUID v4, no reversible mapping to filenames
-- **GDPR Compliant:** No personal data stored in database
-- **DMCA Safe:** We're a search index only; users retain full ownership
-
----
-
-## 📈 Analytics Events
-
-| Event | Description |
-|-------|-------------|
-| `index_start` | User begins indexing a folder |
-| `index_complete` | Indexing finished successfully |
-| `search_query` | User performs a search (includes mode) |
-| `result_click` | User clicks a search result (includes position) |
-| `paywall_view` | User sees the paywall |
-| `paywall_click` | User clicks through paywall |
-| `index_delete` | User deletes their index |
-
----
-
-## ✅ Definition of Done (MVP)
-
-- [ ] User completes full pipeline (OAuth → search results) in ≤2 min on 50-clip folder
-- [ ] p95 search latency <1 s (cold) on 100-clip index
-- [ ] ≥40% of activated users run ≥3 searches within 24 h
-- [ ] ≥10% click fake $5 pay-wall
-- [ ] No P1 bugs: auth loop, 0-byte preview, broken Drive deep-link
-
----
-
-## 🚫 Out of Scope (Post-MVP)
-
-These features are explicitly **not** part of the MVP:
-
-- Multi-language UI
-- Face recognition or OCR
-- Duplicate detection
-- Premiere / Final Cut Pro plug-in
-- Mobile app
-- Upload from local disk (Drive only)
-
----
-
-## 🤝 Contributing
-
-This is an MVP under active development. Please open an issue before submitting PRs.
-
----
-
-## 📄 License
-
-MIT © 2025 ClipFinder
-
----
-
+MIT — see [LICENSE.txt](LICENSE.txt).
