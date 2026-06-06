@@ -1,34 +1,25 @@
-"""Vision embedding service for generating image embeddings using Azure AI Vision CLIP.
+"""Vision embedding service using Gemini Embedding 2 (Google AI Studio).
 
-VERIFIED WORKING API FORMAT (from test_vision_api.py):
-- Endpoint URL: https://<name>.inference.ml.azure.com/score
-- Auth Header: "Authorization: Bearer <API_KEY>"
-- Deployment Header: "azureml-model-deployment: <DEPLOYMENT_NAME>"  # REQUIRED!
+API reference: https://ai.google.dev/gemini-api/docs/embeddings
 
-REQUEST FORMAT:
-{
-    "input_data": {
-        "columns": ["image", "text"],      # BOTH columns always required
-        "index": [0, 1, ...],              # Row indices (0-based)
-        "data": [
-            [image_base64, ""],            # Image-only: text must be empty string ""
-            ["", "description text"],      # Text-only: image must be empty string ""
-        ]
-    }
-}
+REST endpoint:
+    POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent
+    Header: x-goog-api-key
 
-IMAGE ENCODING:
-- Use base64.encodebytes(image_bytes).decode("utf-8")
-- This adds newlines every 76 chars (required by the model)
+Text query (asymmetric retrieval):
+    {"content": {"parts": [{"text": "task: search result | query: ..."}]}, "output_dimensionality": 768}
 
-RESPONSE FORMAT:
-- For images: [{"image_features": [768 floats...]}]
-- For text:   [{"text_features": [768 floats...]}]
+Image:
+    {"content": {"parts": [{"inline_data": {"mime_type": "image/jpeg", "data": "<base64>"}}]}, "output_dimensionality": 768}
+
+Response:
+    {"embedding": {"values": [768 floats]}}
 """
 
+import asyncio
 import base64
 import logging
-from typing import Optional, Literal
+from typing import Any, Literal, Optional
 
 import httpx
 
@@ -37,67 +28,143 @@ from app.observability import trace_embedding_generation
 
 logger = logging.getLogger(__name__)
 
-# Embedding dimension for CLIP model
+GEMINI_EMBED_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+SEARCH_QUERY_PREFIX = "task: search result | query: "
+
 VISION_EMBEDDING_DIMENSION = 768
 
 
+def _detect_image_mime_type(image_bytes: bytes) -> str:
+    """Detect JPEG or PNG from magic bytes; default to JPEG for ffmpeg frames."""
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if image_bytes[:4] == b"\x89PNG":
+        return "image/png"
+    return "image/jpeg"
+
+
+def _format_search_query(text: str) -> str:
+    """Format a search query for asymmetric retrieval per Gemini Embedding 2 docs."""
+    stripped = text.strip()
+    if stripped.startswith("task:"):
+        return stripped
+    return f"{SEARCH_QUERY_PREFIX}{stripped}"
+
+
 class VisionEmbeddingService:
-    """Service for generating image embeddings using Azure AI Vision CLIP model."""
-    
+    """Service for generating multimodal embeddings using Gemini Embedding 2."""
+
     def __init__(self):
-        """Initialize the vision embedding service with Azure AI Vision credentials."""
         settings = get_settings()
-        self.endpoint = settings.azure_ai_vision_endpoint
-        self.api_key = settings.azure_ai_vision_key
-        self.deployment_name = settings.azure_ai_vision_deployment_name
-        
-        if not self.endpoint or not self.api_key:
+        self.api_key = settings.gemini_api_key
+        self.model = settings.gemini_embedding_model
+        self.output_dimensionality = settings.gemini_embedding_dimension
+        self._embed_url = f"{GEMINI_EMBED_BASE_URL}/{self.model}:embedContent"
+
+        if not self.api_key:
             logger.warning(
-                "Azure AI Vision credentials not configured. "
+                "Gemini API key not configured (GEMINI_API_KEY or GOOGLE_AI_VISION_API_KEY). "
                 "Vision embedding generation will be disabled."
             )
-    
+
     @property
     def is_configured(self) -> bool:
-        """Check if Azure AI Vision is properly configured."""
-        return bool(self.endpoint and self.api_key and self.deployment_name)
-    
+        """Check if Gemini Embedding 2 is properly configured."""
+        return bool(self.api_key and self.model)
+
     def _get_headers(self) -> dict[str, str]:
-        """Get the required headers for Azure ML API calls."""
         return {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-            "azureml-model-deployment": self.deployment_name,  # REQUIRED!
+            "x-goog-api-key": self.api_key,
         }
-    
+
+    def _parse_response(self, data: Any) -> Optional[list[float]]:
+        """Extract embedding values from Gemini embedContent response."""
+        if not isinstance(data, dict):
+            logger.error(f"Unexpected Gemini response type: {type(data)}")
+            return None
+
+        embedding = data.get("embedding")
+        if isinstance(embedding, dict):
+            values = embedding.get("values")
+            if isinstance(values, list) and values:
+                return values
+
+        logger.error(f"Unexpected Gemini response format: {data}")
+        return None
+
+    async def _call_gemini_embed(
+        self,
+        parts: list[dict[str, Any]],
+        trace_name: str,
+        input_summary: str,
+    ) -> Optional[list[float]]:
+        """Call Gemini embedContent with retry on rate limits."""
+        request_body = {
+            "content": {"parts": parts},
+            "output_dimensionality": self.output_dimensionality,
+        }
+
+        with trace_embedding_generation(
+            name=trace_name,
+            model=self.model,
+            input_summary=input_summary,
+        ):
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.post(
+                            self._embed_url,
+                            headers=self._get_headers(),
+                            json=request_body,
+                        )
+                        response.raise_for_status()
+                        embedding = self._parse_response(response.json())
+                        if embedding:
+                            logger.debug(
+                                f"Generated embedding (dim={len(embedding)}, "
+                                f"expected={self.output_dimensionality})"
+                            )
+                        return embedding
+
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 429 and attempt < max_retries - 1:
+                        wait = 2 ** attempt
+                        logger.warning(f"Gemini rate limited, retrying in {wait}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.error(
+                        f"Gemini API error: {e.response.status_code} - {e.response.text}"
+                    )
+                    return None
+                except httpx.RequestError as e:
+                    logger.error(f"Gemini request error: {e}")
+                    return None
+                except Exception as e:
+                    logger.error(f"Unexpected error generating vision embedding: {e}")
+                    return None
+
+        return None
+
     async def _get_fresh_thumbnail_url(
-        self, 
-        drive_file_id: str, 
-        google_access_token: str
+        self,
+        drive_file_id: str,
+        google_access_token: str,
     ) -> Optional[str]:
-        """
-        Get a fresh thumbnail URL from Google Drive API.
-        
-        Args:
-            drive_file_id: Google Drive file ID
-            google_access_token: User's Google OAuth access token
-            
-        Returns:
-            Fresh thumbnail URL or None if failed
-        """
+        """Get a fresh thumbnail URL from Google Drive API."""
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
                     f"https://www.googleapis.com/drive/v3/files/{drive_file_id}",
                     params={"fields": "thumbnailLink"},
-                    headers={"Authorization": f"Bearer {google_access_token}"}
+                    headers={"Authorization": f"Bearer {google_access_token}"},
                 )
                 response.raise_for_status()
                 data = response.json()
                 thumbnail_url = data.get("thumbnailLink")
-                
+
                 if thumbnail_url:
-                    # Increase thumbnail size for better embeddings
                     if "=s" in thumbnail_url:
                         thumbnail_url = thumbnail_url.rsplit("=s", 1)[0] + "=s400"
                     return thumbnail_url
@@ -108,39 +175,31 @@ class VisionEmbeddingService:
         except Exception as e:
             logger.error(f"Error getting fresh thumbnail URL: {e}")
             return None
-    
+
     async def _download_image(
-        self, 
+        self,
         image_url: str,
-        google_access_token: Optional[str] = None
+        google_access_token: Optional[str] = None,
     ) -> Optional[bytes]:
-        """
-        Download an image from a URL.
-        
-        Args:
-            image_url: URL of the image to download
-            google_access_token: Optional Google access token (not typically needed for thumbnailLink)
-            
-        Returns:
-            Image bytes or None if download fails
-        """
+        """Download an image from a URL."""
         try:
             headers = {}
-            # Google's lh3.googleusercontent.com URLs don't need auth once we have the link
-            # But some URLs might need it, so include if provided
             if google_access_token and "googleapis.com" in image_url:
                 headers["Authorization"] = f"Bearer {google_access_token}"
-            
+
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
-                    image_url, 
+                    image_url,
                     follow_redirects=True,
-                    headers=headers if headers else None
+                    headers=headers if headers else None,
                 )
                 response.raise_for_status()
                 return response.content
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error downloading image: {e.response.status_code} - URL: {image_url[:100]}...")
+            logger.error(
+                f"HTTP error downloading image: {e.response.status_code} - "
+                f"URL: {image_url[:100]}..."
+            )
             return None
         except httpx.RequestError as e:
             logger.error(f"Request error downloading image: {e}")
@@ -148,347 +207,139 @@ class VisionEmbeddingService:
         except Exception as e:
             logger.error(f"Unexpected error downloading image: {e}")
             return None
-    
-    def _parse_response(
-        self, 
-        data: any, 
-        mode: Literal["image", "text"]
-    ) -> Optional[list[float]]:
-        """
-        Parse the API response to extract embedding features.
-        
-        Args:
-            data: Response JSON data
-            mode: "image" to extract image_features, "text" to extract text_features
-            
-        Returns:
-            Embedding vector or None if parsing fails
-        """
-        feature_key = "image_features" if mode == "image" else "text_features"
-        
-        # Response format: [{"image_features": [...]} or {"text_features": [...]}]
-        if isinstance(data, list) and len(data) > 0:
-            result = data[0]
-            if isinstance(result, dict) and feature_key in result:
-                return result[feature_key]
-        
-        logger.error(f"Unexpected response format from Azure AI Vision: {data}")
-        return None
-    
-    def _parse_batch_response(
-        self, 
-        data: any, 
-        mode: Literal["image", "text"]
-    ) -> list[Optional[list[float]]]:
-        """
-        Parse the batch API response to extract embedding features.
-        
-        Args:
-            data: Response JSON data (list of results)
-            mode: "image" to extract image_features, "text" to extract text_features
-            
-        Returns:
-            List of embedding vectors (or None for failed items)
-        """
-        feature_key = "image_features" if mode == "image" else "text_features"
-        embeddings = []
-        
-        # Response format: [{"image_features": [...]}, {"image_features": [...]}, ...]
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict) and feature_key in item:
-                    embeddings.append(item[feature_key])
-                else:
-                    embeddings.append(None)
-        
-        return embeddings
-    
+
     async def generate_embedding(
-        self, 
+        self,
         image_url_or_text: str,
         mode: Literal["image", "text"] = "image",
         drive_file_id: Optional[str] = None,
-        google_access_token: Optional[str] = None
+        google_access_token: Optional[str] = None,
     ) -> Optional[list[float]]:
         """
         Generate an embedding vector for a single image URL or text query.
-        
+
         Args:
-            image_url_or_text: URL of the image (for mode="image") or text query (for mode="text")
-            mode: "image" for image embedding, "text" for text embedding (CLIP text encoder)
-            drive_file_id: Optional Google Drive file ID to fetch fresh thumbnail (only for image mode)
+            image_url_or_text: Image URL (mode="image") or text query (mode="text")
+            mode: "image" for image embedding, "text" for search query embedding
+            drive_file_id: Optional Drive file ID to fetch fresh thumbnail (image mode)
             google_access_token: Optional Google OAuth token for Drive API access
-            
+
         Returns:
-            A list of floats representing the embedding vector,
-            or None if generation fails
+            Embedding vector or None if generation fails
         """
         if not self.is_configured:
-            logger.warning("Azure AI Vision not configured, skipping embedding generation")
+            logger.warning("Gemini Embedding 2 not configured, skipping embedding generation")
             return None
-        
+
         if not image_url_or_text or not image_url_or_text.strip():
             logger.warning(f"Empty {mode} input provided for embedding generation")
             return None
-        
-        # Prepare the request data based on mode
+
         if mode == "text":
-            # Text embedding: empty image, text filled
-            request_body = {
-                "input_data": {
-                    "columns": ["image", "text"],
-                    "index": [0],
-                    "data": [["", image_url_or_text]]  # [empty_image, text]
-                }
-            }
-        else:
-            # Image embedding: download and encode image
-            actual_url = image_url_or_text
-            if drive_file_id and google_access_token:
-                fresh_url = await self._get_fresh_thumbnail_url(drive_file_id, google_access_token)
-                if fresh_url:
-                    actual_url = fresh_url
-                    logger.debug(f"Using fresh thumbnail URL for file {drive_file_id}")
-            
-            # Download the image
-            image_bytes = await self._download_image(actual_url, google_access_token)
-            if not image_bytes:
-                logger.warning(f"Failed to download image from URL: {actual_url[:100]}...")
-                return None
-            
-            # Convert to base64 using encodebytes (adds newlines every 76 chars - REQUIRED!)
-            image_base64 = base64.encodebytes(image_bytes).decode('utf-8')
-            
-            request_body = {
-                "input_data": {
-                    "columns": ["image", "text"],
-                    "index": [0],
-                    "data": [[image_base64, ""]]  # [image, empty_text]
-                }
-            }
+            formatted_text = _format_search_query(image_url_or_text)
+            input_summary = formatted_text[:200] + (
+                "..." if len(formatted_text) > 200 else ""
+            )
+            return await self._call_gemini_embed(
+                parts=[{"text": formatted_text}],
+                trace_name="vision_embedding",
+                input_summary=input_summary,
+            )
 
-        input_summary = image_url_or_text[:200] + ("..." if len(image_url_or_text) > 200 else "") if mode == "text" else "image"
-        with trace_embedding_generation(
-            name="vision_embedding",
-            model="azure-clip",
-            input_summary=input_summary,
-        ):
-            try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(
-                        self.endpoint,
-                        headers=self._get_headers(),
-                        json=request_body
-                    )
-                    response.raise_for_status()
+        actual_url = image_url_or_text
+        if drive_file_id and google_access_token:
+            fresh_url = await self._get_fresh_thumbnail_url(drive_file_id, google_access_token)
+            if fresh_url:
+                actual_url = fresh_url
+                logger.debug(f"Using fresh thumbnail URL for file {drive_file_id}")
 
-                    data = response.json()
-                    embedding = self._parse_response(data, mode)
+        image_bytes = await self._download_image(actual_url, google_access_token)
+        if not image_bytes:
+            logger.warning(f"Failed to download image from URL: {actual_url[:100]}...")
+            return None
 
-                    if embedding:
-                        logger.debug(f"Generated {mode} embedding (dim={len(embedding)})")
-                        return embedding
+        return await self.generate_embedding_from_image_bytes(image_bytes)
 
-                    return None
-
-            except httpx.HTTPStatusError as e:
-                logger.error(
-                    f"Azure AI Vision API error: {e.response.status_code} - {e.response.text}"
-                )
-                return None
-            except httpx.RequestError as e:
-                logger.error(f"Azure AI Vision request error: {e}")
-                return None
-            except Exception as e:
-                logger.error(f"Unexpected error generating vision embedding: {e}")
-                return None
-
-    async def generate_embedding_from_image_bytes(self, image_bytes: bytes) -> Optional[list[float]]:
+    async def generate_embedding_from_image_bytes(
+        self, image_bytes: bytes
+    ) -> Optional[list[float]]:
         """
         Generate an embedding for image bytes (e.g. extracted video frame).
-        
+
         Args:
-            image_bytes: Raw image bytes (JPEG/PNG etc.)
-            
+            image_bytes: Raw image bytes (JPEG/PNG)
+
         Returns:
-            A list of floats (768-dim CLIP embedding), or None if generation fails
+            Embedding vector (768-dim by default), or None if generation fails
         """
         if not self.is_configured:
-            logger.warning("Azure AI Vision not configured, skipping embedding generation")
+            logger.warning("Gemini Embedding 2 not configured, skipping embedding generation")
             return None
         if not image_bytes:
             return None
-        image_base64 = base64.encodebytes(image_bytes).decode("utf-8")
-        request_body = {
-            "input_data": {
-                "columns": ["image", "text"],
-                "index": [0],
-                "data": [[image_base64, ""]],
-            }
-        }
-        with trace_embedding_generation(
-            name="vision_embedding_from_bytes",
-            model="azure-clip",
+
+        mime_type = _detect_image_mime_type(image_bytes)
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+
+        return await self._call_gemini_embed(
+            parts=[{"inline_data": {"mime_type": mime_type, "data": image_base64}}],
+            trace_name="vision_embedding_from_bytes",
             input_summary="image_bytes",
-        ):
-            try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(
-                        self.endpoint,
-                        headers=self._get_headers(),
-                        json=request_body,
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    return self._parse_response(data, "image")
-            except Exception as e:
-                logger.error(f"Vision embedding from bytes failed: {e}")
-                return None
+        )
 
     async def generate_text_embedding(self, text: str) -> Optional[list[float]]:
         """
-        Generate an embedding for a text query using CLIP's text encoder.
-        
-        This is useful for searching images by text description.
-        The resulting embedding can be compared with image embeddings using cosine similarity.
-        
-        Args:
-            text: The text query to embed
-            
-        Returns:
-            A list of floats representing the embedding vector, or None if generation fails
+        Generate an embedding for a text search query.
+
+        Uses asymmetric retrieval formatting so text queries can be compared
+        against image/frame embeddings in the shared Gemini embedding space.
         """
         return await self.generate_embedding(text, mode="text")
-    
+
     async def generate_embeddings_batch(
-        self, 
+        self,
         image_urls: list[str],
         drive_file_ids: Optional[list[str]] = None,
         google_access_token: Optional[str] = None,
-        batch_size: int = 1
+        batch_size: int = 1,
     ) -> list[Optional[list[float]]]:
         """
-        Generate embeddings for multiple images.
-        
-        NOTE: batch_size=1 is required because the Azure ML CLIP endpoint
-        does not reliably support batching multiple images in a single request.
-        Each image is processed in a separate API call for reliability.
-        
+        Generate embeddings for multiple images (one API call per image).
+
         Args:
-            image_urls: List of image URLs to generate embeddings for
-            drive_file_ids: Optional list of Google Drive file IDs (parallel to image_urls)
-            google_access_token: Optional Google OAuth token for Drive API access
-            batch_size: Number of images to process in each API call (default 1 for reliability)
-            
+            image_urls: List of image URLs
+            drive_file_ids: Optional Drive file IDs parallel to image_urls
+            google_access_token: Optional Google OAuth token
+            batch_size: Ignored; kept for API compatibility (Gemini embeds one image per call)
+
         Returns:
-            List of embedding vectors (or None for failed images),
-            in the same order as input URLs
+            List of embedding vectors in the same order as input URLs
         """
         if not self.is_configured:
-            logger.warning("Azure AI Vision not configured, skipping batch embedding generation")
+            logger.warning("Gemini Embedding 2 not configured, skipping batch embedding generation")
             return [None] * len(image_urls)
-        
+
         if not image_urls:
             return []
-        
+
         results: list[Optional[list[float]]] = [None] * len(image_urls)
-        
-        # Process in batches
-        for batch_start in range(0, len(image_urls), batch_size):
-            batch_end = min(batch_start + batch_size, len(image_urls))
-            batch_urls = image_urls[batch_start:batch_end]
-            batch_file_ids = (
-                drive_file_ids[batch_start:batch_end] 
-                if drive_file_ids else [None] * len(batch_urls)
+
+        for i, url in enumerate(image_urls):
+            if not url or not url.strip():
+                continue
+            file_id = drive_file_ids[i] if drive_file_ids and i < len(drive_file_ids) else None
+            results[i] = await self.generate_embedding(
+                url,
+                mode="image",
+                drive_file_id=file_id,
+                google_access_token=google_access_token,
             )
-            
-            # Filter out empty URLs but track their positions
-            non_empty_indices = []
-            non_empty_urls = []
-            non_empty_file_ids = []
-            for i, (url, file_id) in enumerate(zip(batch_urls, batch_file_ids)):
-                if url and url.strip():
-                    non_empty_indices.append(batch_start + i)
-                    non_empty_urls.append(url)
-                    non_empty_file_ids.append(file_id)
-            
-            if not non_empty_urls:
-                continue
-            
-            # Download all images in this batch and encode to base64
-            images_base64 = []
-            valid_indices = []
-            
-            for i, (url, file_id) in enumerate(zip(non_empty_urls, non_empty_file_ids)):
-                # Try to get fresh thumbnail URL if we have credentials
-                actual_url = url
-                if file_id and google_access_token:
-                    fresh_url = await self._get_fresh_thumbnail_url(file_id, google_access_token)
-                    if fresh_url:
-                        actual_url = fresh_url
-                
-                image_bytes = await self._download_image(actual_url, google_access_token)
-                if image_bytes:
-                    # Use encodebytes (adds newlines every 76 chars - REQUIRED!)
-                    images_base64.append(base64.encodebytes(image_bytes).decode('utf-8'))
-                    valid_indices.append(non_empty_indices[i])
-                else:
-                    logger.warning(f"Failed to download image at index {non_empty_indices[i]}")
-            
-            if not images_base64:
-                continue
-            
-            # Build the batch request with both columns and 2D data array
-            request_body = {
-                "input_data": {
-                    "columns": ["image", "text"],
-                    "index": list(range(len(images_base64))),
-                    "data": [[img_b64, ""] for img_b64 in images_base64]  # [image, empty_text] for each
-                }
-            }
 
-            with trace_embedding_generation(
-                name="vision_embedding_batch",
-                model="azure-clip",
-                input_summary=f"batch of {len(images_base64)} images",
-            ):
-                try:
-                    async with httpx.AsyncClient(timeout=120.0) as client:
-                        response = await client.post(
-                            self.endpoint,
-                            headers=self._get_headers(),
-                            json=request_body
-                        )
-                        response.raise_for_status()
-
-                        data = response.json()
-
-                        # Parse response to extract image_features
-                        embeddings = self._parse_batch_response(data, mode="image")
-
-                        # Map embeddings back to original positions
-                        for i, embedding in enumerate(embeddings):
-                            if i < len(valid_indices) and embedding:
-                                results[valid_indices[i]] = embedding
-
-                        logger.info(
-                            f"Generated {len(embeddings)} vision embeddings in batch "
-                            f"({batch_start}-{batch_end} of {len(image_urls)})"
-                        )
-
-                except httpx.HTTPStatusError as e:
-                    logger.error(
-                        f"Azure AI Vision API error in batch: {e.response.status_code} - {e.response.text}"
-                    )
-                except httpx.RequestError as e:
-                    logger.error(f"Azure AI Vision request error in batch: {e}")
-                except Exception as e:
-                    logger.error(f"Unexpected error in batch vision embedding generation: {e}")
-        
+        generated = sum(1 for r in results if r is not None)
+        logger.info(f"Generated {generated}/{len(image_urls)} vision embeddings in batch")
         return results
 
 
-# Singleton instance for convenience
 _vision_embedding_service: Optional[VisionEmbeddingService] = None
 
 

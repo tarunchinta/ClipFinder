@@ -119,13 +119,7 @@ class IndexedFile(Base):
         nullable=True
     )
     
-    # Filename embedding for semantic search (1536 dimensions for text-embedding-3-small)
-    filename_embedding: Mapped[Optional[list]] = mapped_column(
-        Vector(1536),
-        nullable=True
-    )
-    
-    # Vision embedding for image-based semantic search (768 dimensions for CLIP)
+    # Vision embedding for image-based semantic search (768 dimensions for Gemini Embedding 2)
     vision_embedding: Mapped[Optional[list]] = mapped_column(
         Vector(768),
         nullable=True
@@ -141,6 +135,22 @@ class IndexedFile(Base):
     vision_indexed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime,
         nullable=True
+    )
+
+    # Video frame indexing progress (per-video completion tracking)
+    frames_total: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    frames_completed: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    frames_failed: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
     )
     
     # Timestamps

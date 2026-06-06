@@ -8,19 +8,28 @@ import os
 import subprocess
 import tempfile
 import time
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models.indexed_file import IndexedFile
+from app.database import async_session_maker
+from app.models.indexed_file import IndexedFile, IndexingStatus
 from app.models.video_frame_embedding import VideoFrameEmbedding
-from app.observability import emit_video_frame_trace, flush_langfuse, trace_video_frame
+from app.observability import (
+    emit_video_frame_trace,
+    flush_langfuse,
+    trace_index_file,
+    trace_video_frame,
+)
 from app.services.vision_embedding import get_vision_embedding_service
 
 logger = logging.getLogger(__name__)
@@ -47,8 +56,17 @@ BLOB_SAS_EXPIRY_HOURS = 100
 
 # Extract every 5th frame (frame indices 0, 5, 10, ...)
 FRAME_INTERVAL = 5
-# Commit DB every N frames so the connection isn't idle too long (avoids connection closed by server)
-COMMIT_BATCH_SIZE = 10
+
+
+@dataclass(frozen=True)
+class ExtractedFrame:
+    """One extracted frame ready for CLIP indexing."""
+
+    frame_index: int
+    time_seconds: float
+    blob_path: str
+    frame_image_url: str | None
+    local_jpeg_path: str
 
 
 async def _download_video_from_drive(
@@ -91,7 +109,6 @@ def _get_video_fps(video_path: str) -> float:
         )
         if out.returncode != 0 or not out.stdout.strip():
             return 30.0
-        # r_frame_rate is like "30/1", "30000/1001", or sometimes "1," (trailing comma)
         rate = out.stdout.strip().rstrip(",").strip()
         if not rate:
             return 30.0
@@ -114,7 +131,6 @@ def _extract_frames_ffmpeg(video_path: str, out_dir: str, every_n: int = FRAME_I
     """
     Extract every Nth frame from video. Returns list of (frame_index, time_seconds, path_to_jpeg).
     """
-    # select=not(mod(n\,5)) -> frames 0, 5, 10, ...
     vf = f"select=not(mod(n\\,{every_n}))"
     pattern = os.path.join(out_dir, "frame_%04d.jpg")
     try:
@@ -170,6 +186,24 @@ def _upload_frame_to_azure_blob(
         return blob_client.url
     except Exception as e:
         logger.error(f"Azure Blob upload failed: {e}")
+        return None
+
+
+def _download_frame_from_azure_blob(container_name: str, blob_path: str) -> bytes | None:
+    """Download frame bytes from Azure Blob Storage."""
+    settings = get_settings()
+    if not settings.azure_blob_connection_string:
+        return None
+    try:
+        from azure.storage.blob import BlobServiceClient
+
+        client = BlobServiceClient.from_connection_string(
+            settings.azure_blob_connection_string,
+        )
+        blob_client = client.get_container_client(container_name).get_blob_client(blob_path)
+        return blob_client.download_blob().readall()
+    except Exception as e:
+        logger.error(f"Azure Blob download failed for {blob_path}: {e}")
         return None
 
 
@@ -248,6 +282,419 @@ def _upload_frame_to_supabase(
         return None
 
 
+async def _load_frame_image_bytes(
+    *,
+    image_bytes: bytes | None = None,
+    local_jpeg_path: str | None = None,
+    blob_path: str | None = None,
+) -> bytes | None:
+    """Resolve frame image bytes from in-memory, local path, or blob storage."""
+    if image_bytes is not None:
+        return image_bytes
+    if local_jpeg_path:
+        try:
+            with open(local_jpeg_path, "rb") as f:
+                return f.read()
+        except OSError as e:
+            logger.error("Failed to read local frame %s: %s", local_jpeg_path, e)
+            return None
+    if blob_path:
+        settings = get_settings()
+        loop = asyncio.get_running_loop()
+        if settings.azure_blob_connection_string:
+            return await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _download_frame_from_azure_blob,
+                    settings.azure_blob_container_name,
+                    blob_path,
+                ),
+            )
+        logger.warning("Blob path provided but Azure Blob is not configured")
+    return None
+
+
+async def _upsert_frame_embedding(
+    session: AsyncSession,
+    *,
+    video_id: UUID,
+    frame_index: int,
+    time_seconds: float,
+    embedding: list[float],
+    frame_image_url: str | None,
+) -> None:
+    stmt = insert(VideoFrameEmbedding).values(
+        id=uuid.uuid4(),
+        video_id=video_id,
+        frame_index=frame_index,
+        time_seconds=time_seconds,
+        embedding=embedding,
+        frame_image_url=frame_image_url,
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_video_frame_video_id_frame_index",
+        set_={
+            "time_seconds": stmt.excluded.time_seconds,
+            "embedding": stmt.excluded.embedding,
+            "frame_image_url": stmt.excluded.frame_image_url,
+        },
+    )
+    await session.execute(stmt)
+
+
+async def _record_frame_result(
+    session: AsyncSession,
+    video_id: UUID,
+    *,
+    success: bool,
+) -> None:
+    if success:
+        values = {
+            "frames_completed": IndexedFile.frames_completed + 1,
+            "updated_at": datetime.utcnow(),
+        }
+    else:
+        values = {
+            "frames_failed": IndexedFile.frames_failed + 1,
+            "updated_at": datetime.utcnow(),
+        }
+    await session.execute(
+        update(IndexedFile).where(IndexedFile.id == video_id).values(**values)
+    )
+
+
+async def _maybe_mark_video_indexing_complete(
+    session: AsyncSession,
+    video_id: UUID,
+) -> None:
+    row = (
+        await session.execute(select(IndexedFile).where(IndexedFile.id == video_id))
+    ).scalar_one_or_none()
+    if not row or row.frames_total is None:
+        return
+    if row.frames_completed + row.frames_failed < row.frames_total:
+        return
+
+    now = datetime.utcnow()
+    if row.frames_failed >= row.frames_total:
+        row.indexing_status = IndexingStatus.FAILED.value
+        row.error_message = "All frames failed to index"
+    else:
+        row.indexing_status = IndexingStatus.COMPLETED.value
+        row.error_message = None
+        row.indexed_at = now
+    row.updated_at = now
+
+
+async def extract_and_upload_frames(
+    video_id: UUID,
+    google_access_token: str,
+    session: AsyncSession,
+    work_dir: str,
+) -> tuple[list[ExtractedFrame], IndexedFile | None, str | None]:
+    """
+    Download video from Drive, extract frames with ffmpeg, upload JPEGs to storage.
+
+    Sets indexing_status=processing and frames_total on the video row.
+    Returns (frames, video_row, error_message).
+    """
+    stmt = select(IndexedFile).where(
+        IndexedFile.id == video_id,
+        IndexedFile.file_type == "video",
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if not row:
+        return [], None, "Video not found or not a video"
+
+    row.indexing_status = IndexingStatus.PROCESSING.value
+    row.frames_total = None
+    row.frames_completed = 0
+    row.frames_failed = 0
+    row.error_message = None
+    row.updated_at = datetime.utcnow()
+    await session.commit()
+
+    video_bytes = await _download_video_from_drive(row.drive_file_id, google_access_token)
+    if not video_bytes:
+        row.indexing_status = IndexingStatus.FAILED.value
+        row.error_message = "Failed to download video from Drive"
+        row.updated_at = datetime.utcnow()
+        await session.commit()
+        return [], row, row.error_message
+
+    video_path = os.path.join(work_dir, "video")
+    with open(video_path, "wb") as f:
+        f.write(video_bytes)
+
+    loop = asyncio.get_running_loop()
+    raw_frames = await loop.run_in_executor(
+        None,
+        functools.partial(_extract_frames_ffmpeg, video_path, work_dir, FRAME_INTERVAL),
+    )
+    if not raw_frames:
+        row.indexing_status = IndexingStatus.FAILED.value
+        row.error_message = "No frames extracted (ffmpeg failed or no frames)"
+        row.updated_at = datetime.utcnow()
+        await session.commit()
+        return [], row, row.error_message
+
+    settings = get_settings()
+    extracted: list[ExtractedFrame] = []
+    for frame_index, time_seconds, jpeg_path in raw_frames:
+        with open(jpeg_path, "rb") as f:
+            image_bytes = f.read()
+
+        blob_path = f"{row.user_id}/{video_id}/frame_{frame_index:05d}.jpg"
+        frame_image_url: str | None = None
+        if settings.azure_blob_connection_string:
+            frame_image_url = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _upload_frame_to_azure_blob,
+                    settings.azure_blob_container_name,
+                    blob_path,
+                    image_bytes,
+                ),
+            )
+        elif settings.supabase_url and settings.supabase_key:
+            frame_image_url = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _upload_frame_to_supabase,
+                    settings.supabase_storage_bucket,
+                    blob_path,
+                    image_bytes,
+                ),
+            )
+
+        extracted.append(
+            ExtractedFrame(
+                frame_index=frame_index,
+                time_seconds=time_seconds,
+                blob_path=blob_path,
+                frame_image_url=frame_image_url,
+                local_jpeg_path=jpeg_path,
+            )
+        )
+
+    row.frames_total = len(extracted)
+    row.updated_at = datetime.utcnow()
+    await session.commit()
+
+    logger.info(
+        "Extracted and uploaded %d frames for video_id=%s",
+        len(extracted),
+        video_id,
+    )
+    return extracted, row, None
+
+
+async def _finalize_frame_index_result(
+    session: AsyncSession,
+    video_id: UUID,
+    *,
+    success: bool,
+    update_completion: bool,
+) -> None:
+    if not update_completion:
+        return
+    await _record_frame_result(session, video_id, success=success)
+    await _maybe_mark_video_indexing_complete(session, video_id)
+    await session.commit()
+
+
+async def index_single_frame(
+    video_id: UUID,
+    frame_index: int,
+    time_seconds: float,
+    session: AsyncSession,
+    *,
+    image_bytes: bytes | None = None,
+    local_jpeg_path: str | None = None,
+    blob_path: str | None = None,
+    frame_image_url: str | None = None,
+    filename: str | None = None,
+    trace_ctx: dict | None = None,
+    update_completion: bool = True,
+) -> bool:
+    """
+    CLIP-embed one frame and upsert into video_frame_embeddings.
+
+    Returns True on success. When update_completion is True, atomically increments
+    frames_completed or frames_failed and may mark the video indexing_status complete.
+    """
+    frame_meta = {
+        "video_id": str(video_id),
+        "filename": filename or "",
+        "frame_index": frame_index,
+        "time_seconds": time_seconds,
+    }
+    frame_start = time.perf_counter()
+    success = False
+
+    with trace_video_frame(metadata=frame_meta, trace_context=trace_ctx):
+        try:
+            resolved_bytes = await _load_frame_image_bytes(
+                image_bytes=image_bytes,
+                local_jpeg_path=local_jpeg_path,
+                blob_path=blob_path,
+            )
+            if not resolved_bytes:
+                await session.rollback()
+                await _finalize_frame_index_result(
+                    session, video_id, success=False, update_completion=update_completion
+                )
+                return False
+
+            vision = get_vision_embedding_service()
+            embedding = await vision.generate_embedding_from_image_bytes(resolved_bytes)
+            if not embedding:
+                await session.rollback()
+                await _finalize_frame_index_result(
+                    session, video_id, success=False, update_completion=update_completion
+                )
+                return False
+
+            await _upsert_frame_embedding(
+                session,
+                video_id=video_id,
+                frame_index=frame_index,
+                time_seconds=time_seconds,
+                embedding=embedding,
+                frame_image_url=frame_image_url,
+            )
+
+            if update_completion:
+                await _record_frame_result(session, video_id, success=True)
+                await _maybe_mark_video_indexing_complete(session, video_id)
+
+            await session.commit()
+            success = True
+            logger.info(
+                "Indexed frame video_id=%s frame_index=%s embedding_len=%s",
+                video_id,
+                frame_index,
+                len(embedding),
+            )
+        except Exception as e:
+            logger.exception(
+                "Frame indexing failed for video_id=%s frame_index=%s: %s",
+                video_id,
+                frame_index,
+                e,
+            )
+            await session.rollback()
+            try:
+                await _finalize_frame_index_result(
+                    session, video_id, success=False, update_completion=update_completion
+                )
+            except Exception:
+                await session.rollback()
+            return False
+        finally:
+            frame_duration_ms = (time.perf_counter() - frame_start) * 1000
+            emit_video_frame_trace(metadata=frame_meta, duration_ms=frame_duration_ms)
+
+    return success
+
+
+async def index_image_thumbnail(
+    file_id: UUID,
+    google_access_token: str,
+    session: AsyncSession,
+    trace_id: str | None = None,
+    parent_span_id: str | None = None,
+) -> dict:
+    """
+    Download thumbnail, generate CLIP embedding, and update indexed_files for an image.
+
+    Intended for image-index queue workers; callable directly for in-process use.
+    """
+    result = {"success": False, "error": None}
+    stmt = select(IndexedFile).where(
+        IndexedFile.id == file_id,
+        IndexedFile.file_type == "image",
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if not row:
+        result["error"] = "Image not found or not an image"
+        return result
+
+    file_meta = {
+        "file_id": str(file_id),
+        "filename": row.filename,
+    }
+    if trace_id:
+        file_meta["trace_id"] = trace_id
+    if parent_span_id:
+        file_meta["parent_span_id"] = parent_span_id
+
+    with trace_index_file("image", metadata=file_meta):
+        if not row.thumbnail_url:
+            result["error"] = "No thumbnail URL on file record"
+            row.vision_indexing_status = IndexingStatus.FAILED.value
+            row.error_message = result["error"]
+            row.updated_at = datetime.utcnow()
+            await session.commit()
+            return result
+
+        vision = get_vision_embedding_service()
+        if not vision.is_configured:
+            result["error"] = "Vision embedding service not configured"
+            return result
+
+        row.vision_indexing_status = IndexingStatus.PROCESSING.value
+        row.updated_at = datetime.utcnow()
+        await session.commit()
+
+        embedding = await vision.generate_embedding(
+            row.thumbnail_url,
+            mode="image",
+            drive_file_id=row.drive_file_id,
+            google_access_token=google_access_token,
+        )
+        if not embedding:
+            row.vision_indexing_status = IndexingStatus.FAILED.value
+            row.error_message = "Failed to generate vision embedding"
+            row.updated_at = datetime.utcnow()
+            await session.commit()
+            result["error"] = row.error_message
+            return result
+
+        now = datetime.utcnow()
+        row.vision_embedding = embedding
+        row.vision_indexing_status = IndexingStatus.COMPLETED.value
+        row.vision_indexed_at = now
+        row.error_message = None
+        row.updated_at = now
+        await session.commit()
+        result["success"] = True
+        return result
+
+
+async def _index_frame_with_own_session(
+    video_id: UUID,
+    frame: ExtractedFrame,
+    *,
+    filename: str,
+    trace_ctx: dict | None,
+    semaphore: asyncio.Semaphore,
+) -> bool:
+    async with semaphore:
+        async with async_session_maker() as frame_session:
+            return await index_single_frame(
+                video_id,
+                frame.frame_index,
+                frame.time_seconds,
+                frame_session,
+                local_jpeg_path=frame.local_jpeg_path,
+                blob_path=frame.blob_path,
+                frame_image_url=frame.frame_image_url,
+                filename=filename,
+                trace_ctx=trace_ctx,
+            )
+
+
 async def run_frame_indexing_for_video(
     video_id: UUID,
     google_access_token: str,
@@ -256,172 +703,78 @@ async def run_frame_indexing_for_video(
     parent_span_id: str | None = None,
 ) -> dict:
     """
-    For one video: download from Drive, extract every 5th frame, upload to Azure Blob
-    (or Supabase if Blob not configured), generate CLIP embeddings, insert into
-    video_frame_embeddings. Returns stats: { "frames_processed": int, "frames_failed": int,
-    "error": str | None }.
-    trace_id, parent_span_id: optional Langfuse trace context to attach frame spans to the batch trace.
+    For one video: extract frames, then CLIP+DB each frame in parallel (bounded).
+
+    Returns stats: { "frames_processed": int, "frames_failed": int, "error": str | None }.
     """
     result = {"frames_processed": 0, "frames_failed": 0, "error": None}
     logger.info("Video frame indexing starting for video_id=%s", video_id)
-    # #region agent log
     _debug_log("video_frame_indexing.py:run_frame_indexing_for_video", "Entry", {"video_id": str(video_id)}, "H5")
-    # #endregion
 
-    # Load video row
-    stmt = select(IndexedFile).where(
-        IndexedFile.id == video_id,
-        IndexedFile.file_type == "video",
-    )
-    row = (await session.execute(stmt)).scalar_one_or_none()
-    if not row:
-        result["error"] = "Video not found or not a video"
-        # #region agent log
-        _debug_log("video_frame_indexing.py:run_frame_indexing_for_video", "Video row not found", {"video_id": str(video_id)}, "H5")
-        # #endregion
-        logger.warning("Video not found or not a video: video_id=%s", video_id)
-        return result
+    trace_ctx = None
+    if trace_id and parent_span_id:
+        trace_ctx = {"trace_id": trace_id, "parent_span_id": parent_span_id}
 
-    drive_file_id = row.drive_file_id
-    video_bytes = await _download_video_from_drive(drive_file_id, google_access_token)
-    if not video_bytes:
-        result["error"] = "Failed to download video from Drive"
-        # #region agent log
-        _debug_log("video_frame_indexing.py:run_frame_indexing_for_video", "Drive download failed", {"video_id": str(video_id)}, "H5")
-        # #endregion
-        logger.warning("Failed to download video from Drive: video_id=%s", video_id)
-        return result
+    settings = get_settings()
+    parallelism = max(1, settings.frame_index_parallelism)
+    semaphore = asyncio.Semaphore(parallelism)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        video_path = os.path.join(tmpdir, "video")
-        with open(video_path, "wb") as f:
-            f.write(video_bytes)
-
-        loop = asyncio.get_running_loop()
-        frames = await loop.run_in_executor(
-            None,
-            functools.partial(_extract_frames_ffmpeg, video_path, tmpdir, FRAME_INTERVAL),
+        frames, row, extract_error = await extract_and_upload_frames(
+            video_id=video_id,
+            google_access_token=google_access_token,
+            session=session,
+            work_dir=tmpdir,
         )
-        if not frames:
-            result["error"] = "No frames extracted (ffmpeg failed or no frames)"
-            # #region agent log
-            _debug_log("video_frame_indexing.py:run_frame_indexing_for_video", "No frames extracted", {"video_id": str(video_id)}, "H5")
-            # #endregion
-            logger.warning("No frames extracted for video_id=%s", video_id)
+        if extract_error or not row:
+            result["error"] = extract_error or "Video extraction failed"
+            _debug_log(
+                "video_frame_indexing.py:run_frame_indexing_for_video",
+                "Extract failed",
+                {"video_id": str(video_id), "error": result["error"]},
+                "H5",
+            )
             return result
 
         logger.info(
-            "Extracted %d frames for video_id=%s, preparing to insert into video_frame_embeddings",
+            "Indexing %d frames for video_id=%s with parallelism=%d",
             len(frames),
             video_id,
+            parallelism,
         )
 
-        settings = get_settings()
-        vision = get_vision_embedding_service()
-
-        trace_ctx = None
-        if trace_id and parent_span_id:
-            trace_ctx = {"trace_id": trace_id, "parent_span_id": parent_span_id}
-
-        for frame_index, time_seconds, jpeg_path in frames:
-            frame_meta = {
-                "video_id": str(video_id),
-                "filename": row.filename,
-                "frame_index": frame_index,
-                "time_seconds": time_seconds,
-            }
-            frame_start = time.perf_counter()
-            with trace_video_frame(metadata=frame_meta, trace_context=trace_ctx):
-                with open(jpeg_path, "rb") as f:
-                    image_bytes = f.read()
-
-                path_in_bucket = f"{row.user_id}/{video_id}/frame_{frame_index:05d}.jpg"
-                if settings.azure_blob_connection_string:
-                    frame_image_url = await loop.run_in_executor(
-                        None,
-                        functools.partial(
-                            _upload_frame_to_azure_blob,
-                            settings.azure_blob_container_name,
-                            path_in_bucket,
-                            image_bytes,
-                        ),
-                    )
-                elif settings.supabase_url and settings.supabase_key:
-                    frame_image_url = await loop.run_in_executor(
-                        None,
-                        functools.partial(
-                            _upload_frame_to_supabase,
-                            settings.supabase_storage_bucket,
-                            path_in_bucket,
-                            image_bytes,
-                        ),
-                    )
-                else:
-                    frame_image_url = None
-
-                embedding = await vision.generate_embedding_from_image_bytes(image_bytes)
-                if not embedding:
-                    result["frames_failed"] += 1
-                    continue
-
-                rec = VideoFrameEmbedding(
-                    video_id=video_id,
-                    frame_index=frame_index,
-                    time_seconds=time_seconds,
-                    embedding=embedding,
-                    frame_image_url=frame_image_url,
-                )
-                session.add(rec)
-                result["frames_processed"] += 1
-                logger.info(
-                    "video_frame_embeddings row to insert: video_id=%s frame_index=%s time_seconds=%s embedding_len=%s frame_image_url=%s",
+        outcomes = await asyncio.gather(
+            *[
+                _index_frame_with_own_session(
                     video_id,
-                    frame_index,
-                    time_seconds,
-                    len(embedding) if embedding else 0,
-                    "set" if frame_image_url else "null",
+                    frame,
+                    filename=row.filename,
+                    trace_ctx=trace_ctx,
+                    semaphore=semaphore,
                 )
+                for frame in frames
+            ],
+            return_exceptions=True,
+        )
 
-                if result["frames_processed"] % COMMIT_BATCH_SIZE == 0:
-                    try:
-                        await session.commit()
-                        logger.info(
-                            "Committed batch of %d frames for video_id=%s",
-                            COMMIT_BATCH_SIZE,
-                            video_id,
-                        )
-                    except Exception as e:
-                        logger.exception(
-                            "Batch commit failed for video_id=%s: %s",
-                            video_id,
-                            e,
-                        )
-                        result["error"] = str(e)
-                        raise
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                result["frames_failed"] += 1
+                logger.exception("Unexpected frame task error: %s", outcome)
+            elif outcome:
+                result["frames_processed"] += 1
+            else:
+                result["frames_failed"] += 1
 
-            frame_duration_ms = (time.perf_counter() - frame_start) * 1000
-            emit_video_frame_trace(metadata=frame_meta, duration_ms=frame_duration_ms)
-
-    # Commit any remaining rows (last partial batch)
-    if result["frames_processed"] > 0 and result["frames_processed"] % COMMIT_BATCH_SIZE != 0:
-        try:
-            await session.commit()
-            logger.info(
-                "Committed video_frame_embeddings for video_id=%s (%d rows total)",
-                video_id,
-                result["frames_processed"],
-            )
-        except Exception as e:
-            logger.exception(
-                "Final commit failed for video_id=%s: %s. Pending rows: %d",
-                video_id,
-                e,
-                result["frames_processed"],
-            )
-            result["error"] = str(e)
-            raise
     flush_langfuse()
-    # #region agent log
-    _debug_log("video_frame_indexing.py:run_frame_indexing_for_video", "Completed", {"video_id": str(video_id), "frames_processed": result["frames_processed"], "error": result["error"]}, "H5")
-    # #endregion
+    _debug_log(
+        "video_frame_indexing.py:run_frame_indexing_for_video",
+        "Completed",
+        {
+            "video_id": str(video_id),
+            "frames_processed": result["frames_processed"],
+            "error": result["error"],
+        },
+        "H5",
+    )
     return result

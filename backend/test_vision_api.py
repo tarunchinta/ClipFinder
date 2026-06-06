@@ -1,50 +1,17 @@
 """
-Azure AI Vision CLIP Embedding API Test Script
-==============================================
-
-VERIFIED WORKING - January 2026
-
-ENDPOINT CONFIGURATION:
-=======================
-- Endpoint URL: https://<name>.inference.ml.azure.com/score
-- Auth Header: "Authorization: Bearer <API_KEY>"
-- Deployment Header: "azureml-model-deployment: <DEPLOYMENT_NAME>"  # REQUIRED!
-
-REQUEST FORMAT (VERIFIED WORKING):
+Gemini Embedding 2 API Test Script
 ==================================
-{
-    "input_data": {
-        "columns": ["image", "text"],      # BOTH columns always required
-        "index": [0, 1, ...],              # Row indices (0-based)
-        "data": [
-            [image_base64, ""],            # Image-only: text must be empty string ""
-            ["", "description text"],      # Text-only: image must be empty string ""
-            [image_base64, "description"]  # Both: provide both values
-        ]
-    }
-}
 
-IMAGE ENCODING:
-===============
-- Use base64.encodebytes(image_bytes).decode("utf-8")
-- This adds newlines every 76 chars (required by the model)
-- Do NOT use base64.b64encode() - it may not work
+API reference: https://ai.google.dev/gemini-api/docs/embeddings
 
-RESPONSE FORMAT:
-================
-Returns a list of dicts, one per input row:
-- For images: [{"image_features": [768 floats...]}]
-- For text:   [{"text_features": [768 floats...]}]
-- For both:   [{"image_features": [...], "text_features": [...]}]
-
-Embedding dimension: 768
+Tests text and image embedding via Google AI Studio embedContent endpoint.
 
 Run with: python test_vision_api.py
 """
 
 import asyncio
 import base64
-import json
+import math
 import os
 from pathlib import Path
 
@@ -53,132 +20,122 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-# ============ CONFIGURATION ============
-ENDPOINT = os.getenv("AZURE_AI_VISION_ENDPOINT", "")
-API_KEY = os.getenv("AZURE_AI_VISION_KEY", "")
-DEPLOYMENT_NAME = "openai-clip-image-text-embedd"
+GEMINI_EMBED_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
+OUTPUT_DIM = int(os.getenv("GEMINI_EMBEDDING_DIMENSION", "768"))
+API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_VISION_API_KEY", "")
+EMBED_URL = f"{GEMINI_EMBED_BASE_URL}/{MODEL}:embedContent"
 
 
-async def test_text_embedding():
-    """Test text-only embedding (verified working)."""
-    print("\n" + "=" * 60)
-    print("  TEST: Text Embedding")
-    print("=" * 60)
-    
-    request_body = {
-        "input_data": {
-            "columns": ["image", "text"],
-            "index": [0],
-            "data": [
-                ["", "a photo of a cat"]  # Empty image, text only
-            ]
-        }
-    }
-    
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    if mag_a == 0 or mag_b == 0:
+        return 0.0
+    return dot / (mag_a * mag_b)
+
+
+async def embed(parts: list[dict], label: str) -> list[float] | None:
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}",
-        "azureml-model-deployment": DEPLOYMENT_NAME,
+        "x-goog-api-key": API_KEY,
     }
-    
-    print(f"Request: {json.dumps(request_body, indent=2)}")
-    
+    body = {
+        "content": {"parts": parts},
+        "output_dimensionality": OUTPUT_DIM,
+    }
+
     async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(ENDPOINT, headers=headers, json=request_body)
-        
-    print(f"\nStatus: {response.status_code}")
-    
-    if response.status_code == 200:
-        data = response.json()
-        print("✓ SUCCESS!")
-        if isinstance(data, list) and len(data) > 0:
-            features = data[0].get("text_features", [])
-            print(f"  Embedding dimension: {len(features)}")
-            print(f"  First 5 values: {features[:5]}")
-        return True
-    else:
-        print(f"✗ FAILED: {response.text[:200]}")
-        return False
+        response = await client.post(EMBED_URL, headers=headers, json=body)
+
+    print(f"\n{label} — Status: {response.status_code}")
+    if response.status_code != 200:
+        print(f"  FAILED: {response.text[:300]}")
+        return None
+
+    data = response.json()
+    values = data.get("embedding", {}).get("values", [])
+    if not values:
+        print(f"  FAILED: unexpected response {data}")
+        return None
+
+    print(f"  OK — dimension: {len(values)}, first 5: {values[:5]}")
+    return values
 
 
-async def test_image_embedding():
-    """Test image embedding by downloading a real test image."""
+async def test_text_embedding() -> tuple[bool, list[float] | None]:
+    print("\n" + "=" * 60)
+    print("  TEST: Text Embedding (search query)")
+    print("=" * 60)
+
+    values = await embed(
+        [{"text": "task: search result | query: a photo of a cat"}],
+        "Text query",
+    )
+    return (values is not None and len(values) == OUTPUT_DIM, values)
+
+
+async def test_image_embedding() -> tuple[bool, list[float] | None]:
     print("\n" + "=" * 60)
     print("  TEST: Image Embedding")
     print("=" * 60)
-    
-    # Download a small test image (placeholder image service)
+
     print("Downloading test image...")
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         img_response = await client.get("https://picsum.photos/200/200")
         if img_response.status_code != 200:
-            print(f"✗ Failed to download test image: {img_response.status_code}")
-            return False
+            print(f"  FAILED to download test image: {img_response.status_code}")
+            return False, None
         image_bytes = img_response.content
-    
-    # Encode to base64 (use encodebytes like the notebook does)
-    image_base64 = base64.encodebytes(image_bytes).decode("utf-8")
-    print(f"Image size: {len(image_bytes)} bytes, base64 length: {len(image_base64)}")
-    
-    request_body = {
-        "input_data": {
-            "columns": ["image", "text"],
-            "index": [0],
-            "data": [
-                [image_base64, ""]  # Image only, empty text
-            ]
-        }
-    }
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}",
-        "azureml-model-deployment": DEPLOYMENT_NAME,
-    }
-    
-    print("Sending request...")
-    
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(ENDPOINT, headers=headers, json=request_body)
-        
-    print(f"Status: {response.status_code}")
-    
-    if response.status_code == 200:
-        data = response.json()
-        print("✓ SUCCESS!")
-        if isinstance(data, list) and len(data) > 0:
-            features = data[0].get("image_features", [])
-            print(f"  Embedding dimension: {len(features)}")
-            print(f"  First 5 values: {features[:5]}")
-        return True
-    else:
-        print(f"✗ FAILED: {response.text[:300]}")
+
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+    print(f"Image size: {len(image_bytes)} bytes")
+
+    values = await embed(
+        [{"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}],
+        "Image",
+    )
+    return (values is not None and len(values) == OUTPUT_DIM, values)
+
+
+async def test_cross_modal(text_vec: list[float] | None, image_vec: list[float] | None) -> bool:
+    print("\n" + "=" * 60)
+    print("  TEST: Cross-modal similarity sanity check")
+    print("=" * 60)
+
+    if not text_vec or not image_vec:
+        print("  SKIPPED (text or image test failed)")
         return False
+
+    sim = cosine_similarity(text_vec, image_vec)
+    print(f"  Cosine similarity (cat query vs random image): {sim:.4f}")
+    print("  (Random image won't match 'cat' strongly; this confirms vectors are valid.)")
+    return True
 
 
 async def main():
     print("\n" + "=" * 60)
-    print("  AZURE AI VISION CLIP EMBEDDING TEST")
+    print("  GEMINI EMBEDDING 2 TEST")
     print("=" * 60)
-    
-    print(f"\nEndpoint: {ENDPOINT}")
-    print(f"Deployment: {DEPLOYMENT_NAME}")
+    print(f"\nModel: {MODEL}")
+    print(f"Output dimension: {OUTPUT_DIM}")
     print(f"API Key: {'*' * 10 + API_KEY[-4:] if API_KEY else '(not set)'}")
-    
-    if not ENDPOINT or not API_KEY:
-        print("\n✗ ERROR: Missing AZURE_AI_VISION_ENDPOINT or AZURE_AI_VISION_KEY in .env")
+
+    if not API_KEY:
+        print("\nERROR: Set GEMINI_API_KEY or GOOGLE_AI_VISION_API_KEY in backend/.env")
         return
-    
-    # Run tests
-    text_ok = await test_text_embedding()
-    image_ok = await test_image_embedding()
-    
-    # Summary
+
+    text_ok, text_vec = await test_text_embedding()
+    image_ok, image_vec = await test_image_embedding()
+    cross_ok = await test_cross_modal(text_vec, image_vec)
+
     print("\n" + "=" * 60)
     print("  SUMMARY")
     print("=" * 60)
-    print(f"  Text embedding:  {'✓ Working' if text_ok else '✗ Failed'}")
-    print(f"  Image embedding: {'✓ Working' if image_ok else '✗ Failed'}")
+    print(f"  Text embedding:  {'OK' if text_ok else 'FAILED'}")
+    print(f"  Image embedding: {'OK' if image_ok else 'FAILED'}")
+    print(f"  Cross-modal:     {'OK' if cross_ok else 'SKIPPED/FAILED'}")
     print("=" * 60 + "\n")
 
 

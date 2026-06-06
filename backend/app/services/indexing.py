@@ -18,7 +18,6 @@ from app.observability import (
     trace_index_file,
     trace_vector_search,
 )
-from app.services.embedding import get_embedding_service
 from app.services.video_frame_indexing import get_blob_url_with_sas
 from app.services.vision_embedding import get_vision_embedding_service
 
@@ -43,7 +42,6 @@ class IndexingService:
         google_account_id: str,
         folder_id: str,
         files: list[dict],
-        generate_embeddings: bool = True,
         generate_vision_embeddings: bool = True,
         google_access_token: Optional[str] = None,
     ) -> tuple[list[IndexedFile], list[dict]]:
@@ -59,7 +57,6 @@ class IndexingService:
             google_account_id: Google account ID from OAuth
             folder_id: Google Drive folder ID
             files: List of file metadata dicts from GoogleDriveService
-            generate_embeddings: Whether to generate embeddings for filenames (default True)
             generate_vision_embeddings: Whether to generate vision embeddings for thumbnails (default True)
             google_access_token: Google OAuth token for fetching fresh thumbnail URLs
         
@@ -69,18 +66,6 @@ class IndexingService:
         """
         if not files:
             return [], []
-        
-        # Generate text embeddings for filenames in batch (fast, text-only API call)
-        filenames = [file["name"] for file in files]
-        embeddings: list[Optional[list[float]]] = [None] * len(files)
-        
-        if generate_embeddings:
-            embedding_service = get_embedding_service()
-            if embedding_service.is_configured:
-                logger.info(f"Generating text embeddings for {len(filenames)} filenames")
-                embeddings = await embedding_service.generate_embeddings_batch(filenames)
-            else:
-                logger.warning("Text embedding service not configured, skipping text embedding generation")
         
         # Resolve vision service once; per-file generation happens inside each span
         vision_service = None
@@ -148,7 +133,6 @@ class IndexingService:
                     "drive_url": file.get("driveUrl"),
                     "indexing_status": IndexingStatus.PENDING.value,
                     "error_message": None,
-                    "filename_embedding": embeddings[i],
                     "vision_embedding": vision_embeddings[i],
                     "vision_indexing_status": IndexingStatus.COMPLETED.value if vision_embeddings[i] else None,
                     "vision_indexed_at": datetime.utcnow() if vision_embeddings[i] else None,
@@ -177,7 +161,6 @@ class IndexingService:
                 "drive_url": stmt.excluded.drive_url,
                 "indexing_status": IndexingStatus.PENDING.value,
                 "error_message": None,
-                "filename_embedding": stmt.excluded.filename_embedding,
                 "vision_embedding": stmt.excluded.vision_embedding,
                 "vision_indexing_status": stmt.excluded.vision_indexing_status,
                 "vision_indexed_at": stmt.excluded.vision_indexed_at,
@@ -484,173 +467,6 @@ class IndexingService:
                 span.update(metadata={"result_count": len(results)})
             return results
     
-    async def get_files_without_embeddings(
-        self,
-        user_id: Optional[UUID] = None,
-        limit: int = 100
-    ) -> list[IndexedFile]:
-        """
-        Get files that don't have filename embeddings yet.
-        
-        Args:
-            user_id: Optional user UUID to filter by (if None, gets all users)
-            limit: Maximum number of files to return
-        
-        Returns:
-            List of IndexedFile records without embeddings
-        """
-        conditions = [IndexedFile.filename_embedding.is_(None)]
-        
-        if user_id:
-            conditions.append(IndexedFile.user_id == user_id)
-        
-        stmt = select(IndexedFile).where(
-            and_(*conditions)
-        ).order_by(IndexedFile.created_at).limit(limit)
-        
-        result = await self.session.execute(stmt)
-        return list(result.scalars().all())
-    
-    async def generate_missing_embeddings(
-        self,
-        user_id: Optional[UUID] = None,
-        batch_size: int = 100
-    ) -> dict:
-        """
-        Generate embeddings for files that don't have them yet.
-        
-        Args:
-            user_id: Optional user UUID to filter by (if None, processes all users)
-            batch_size: Number of files to process in each batch
-        
-        Returns:
-            Dict with processing statistics
-        """
-        embedding_service = get_embedding_service()
-        
-        if not embedding_service.is_configured:
-            logger.warning("Embedding service not configured")
-            return {
-                "success": False,
-                "error": "Embedding service not configured",
-                "processed": 0,
-                "failed": 0,
-            }
-        
-        stats = {
-            "success": True,
-            "processed": 0,
-            "failed": 0,
-            "total_found": 0,
-        }
-        
-        # Get files without embeddings
-        files = await self.get_files_without_embeddings(user_id, limit=batch_size)
-        stats["total_found"] = len(files)
-        
-        if not files:
-            logger.info("No files found without embeddings")
-            return stats
-        
-        # Extract filenames
-        filenames = [f.filename for f in files]
-        
-        # Generate embeddings in batch
-        logger.info(f"Generating embeddings for {len(filenames)} files")
-        embeddings = await embedding_service.generate_embeddings_batch(filenames)
-        
-        # Update files with their embeddings
-        for i, file in enumerate(files):
-            embedding = embeddings[i]
-            if embedding:
-                file.filename_embedding = embedding
-                file.updated_at = datetime.utcnow()
-                stats["processed"] += 1
-            else:
-                stats["failed"] += 1
-                logger.warning(f"Failed to generate embedding for file: {file.filename}")
-        
-        await self.session.commit()
-        
-        logger.info(
-            f"Embedding generation complete: {stats['processed']} processed, "
-            f"{stats['failed']} failed"
-        )
-        
-        return stats
-    
-    async def semantic_search(
-        self,
-        user_id: UUID,
-        query: str,
-        file_type: Optional[str] = None,
-        limit: int = 20,
-        similarity_threshold: float = 0.0
-    ) -> list[tuple[IndexedFile, float]]:
-        """
-        Search indexed files using semantic similarity on filename embeddings.
-        
-        Uses cosine similarity to find files with semantically similar filenames
-        to the search query.
-        
-        Args:
-            user_id: User UUID
-            query: Search query text
-            file_type: Optional filter by file type ("video" or "image")
-            limit: Maximum number of results to return
-            similarity_threshold: Minimum similarity score (0.0-1.0, where 1.0 is identical)
-        
-        Returns:
-            List of tuples (IndexedFile, similarity_score), ordered by similarity descending
-        """
-        if not query or not query.strip():
-            return []
-        
-        # Generate embedding for the query
-        embedding_service = get_embedding_service()
-        
-        if not embedding_service.is_configured:
-            logger.warning("Embedding service not configured for semantic search")
-            return []
-        
-        query_embedding = await embedding_service.generate_embedding(query)
-        
-        if not query_embedding:
-            logger.warning(f"Failed to generate embedding for query: {query}")
-            return []
-        
-        # Build conditions
-        conditions = [
-            IndexedFile.user_id == user_id,
-            IndexedFile.filename_embedding.isnot(None),
-        ]
-        
-        if file_type and file_type in ("video", "image"):
-            conditions.append(IndexedFile.file_type == file_type)
-        
-        # Use cosine distance for similarity search
-        # pgvector uses <=> for cosine distance (lower is more similar)
-        # We convert to similarity score: 1 - distance
-        cosine_distance = IndexedFile.filename_embedding.cosine_distance(query_embedding)
-        similarity_score = (1 - cosine_distance).label("similarity")
-        
-        stmt = select(IndexedFile, similarity_score).where(
-            and_(*conditions)
-        ).order_by(cosine_distance).limit(limit)
-
-        with trace_vector_search("semantic_filename_search", metadata={"limit": limit}):
-            result = await self.session.execute(stmt)
-            rows = result.all()
-
-        # Filter by similarity threshold and return results
-        results = []
-        for row in rows:
-            file, score = row
-            if score >= similarity_threshold:
-                results.append((file, float(score)))
-
-        return results
-
     @staticmethod
     def _normalize_scores(scores: list[float]) -> list[float]:
         """

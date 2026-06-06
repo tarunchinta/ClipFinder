@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import ForeignKey, Index, Integer, Float, String
+from sqlalchemy import ForeignKey, Index, Integer, Float, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
@@ -45,6 +45,11 @@ class VideoFrameEmbedding(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "video_id",
+            "frame_index",
+            name="uq_video_frame_video_id_frame_index",
+        ),
         Index("ix_video_frame_embeddings_video_id", "video_id"),
     )
 

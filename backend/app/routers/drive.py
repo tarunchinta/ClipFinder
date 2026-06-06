@@ -324,9 +324,8 @@ async def index_folder_files(
     This endpoint:
     1. Fetches files from the specified folder
     2. Filters to valid files only (≤30s duration for videos, ≤100MB size)
-    3. Generates text embeddings for filenames
-    4. Generates vision embeddings for thumbnails
-    5. Saves file metadata to the database with status='pending'
+    3. Generates vision embeddings for thumbnails
+    4. Saves file metadata to the database with status='pending'
     
     For re-indexing, existing files are reset to 'pending' status.
     """
@@ -374,7 +373,7 @@ async def index_folder_files(
         expires_at=user.google_token_expires_at,
         session=session
     )
-    logger.info("[index] Saving %d file(s) for indexing (text + vision embeddings)", len(valid_files))
+    logger.info("[index] Saving %d file(s) for indexing (vision embeddings)", len(valid_files))
 
     batch_metadata = {
         "folder_id": folder_id,
@@ -485,142 +484,7 @@ async def get_folder_indexing_stats(
     return IndexingStatsResponse(**stats)
 
 
-# --- Embedding & Search Endpoints ---
-
-class GenerateEmbeddingsResponse(BaseModel):
-    """Response for batch embedding generation."""
-    success: bool
-    processed: int
-    failed: int
-    totalFound: int
-    error: Optional[str] = None
-
-
-class SemanticSearchFileInfo(BaseModel):
-    """File information for semantic search results with similarity score."""
-    id: UUID
-    driveFileId: str
-    filename: str
-    mimeType: str
-    fileType: str
-    sizeBytes: int
-    durationSeconds: Optional[float] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
-    thumbnailUrl: Optional[str] = None
-    driveUrl: Optional[str] = None
-    indexingStatus: str
-    similarityScore: float
-
-    class Config:
-        from_attributes = True
-
-
-class SemanticSearchResponse(BaseModel):
-    """Response for semantic file search."""
-    files: list[SemanticSearchFileInfo]
-    totalCount: int
-    query: str
-
-
-@router.post("/embeddings/generate", response_model=GenerateEmbeddingsResponse)
-async def generate_missing_embeddings(
-    user: User = Depends(current_active_user),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """
-    Generate embeddings for files that don't have them yet.
-    
-    This endpoint processes files in batches and generates
-    filename embeddings using Azure OpenAI's text-embedding-3-small model.
-    
-    Call this endpoint to backfill embeddings for files that were
-    indexed before embedding generation was enabled.
-    """
-    with trace_retrieval("generate_text_embeddings", metadata={"user_id": str(user.id)}):
-        indexing_service = IndexingService(session)
-        stats = await indexing_service.generate_missing_embeddings(
-            user_id=user.id,
-            batch_size=100,
-        )
-    flush_langfuse()
-    return GenerateEmbeddingsResponse(
-        success=stats.get("success", False),
-        processed=stats.get("processed", 0),
-        failed=stats.get("failed", 0),
-        totalFound=stats.get("total_found", 0),
-        error=stats.get("error"),
-    )
-
-
-@router.get("/search/semantic", response_model=SemanticSearchResponse)
-async def semantic_search_files(
-    q: str = "",
-    file_type: Optional[str] = None,
-    limit: int = 20,
-    user: User = Depends(current_active_user),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """
-    Search indexed files using semantic similarity.
-    
-    Uses vector embeddings to find files with semantically similar filenames
-    to the search query. This enables finding files even when the query
-    doesn't exactly match the filename.
-    
-    Args:
-        q: Search query (natural language description of what you're looking for)
-        file_type: Optional filter by file type ("video" or "image")
-        limit: Maximum number of results to return (default 20, max 100)
-    
-    Returns:
-        List of matching files with similarity scores, ordered by relevance
-    """
-    if not q or not q.strip():
-        return SemanticSearchResponse(
-            files=[],
-            totalCount=0,
-            query=q,
-        )
-    
-    # Cap limit at 100
-    limit = min(limit, 100)
-
-    with trace_retrieval("semantic_search", metadata={"query": q[:100], "limit": limit}):
-        indexing_service = IndexingService(session)
-        results = await indexing_service.semantic_search(
-            user_id=user.id,
-            query=q,
-            file_type=file_type,
-            limit=limit,
-        )
-
-    # Convert to response format
-    response_files = [
-        SemanticSearchFileInfo(
-            id=f.id,
-            driveFileId=f.drive_file_id,
-            filename=f.filename,
-            mimeType=f.mime_type,
-            fileType=f.file_type,
-            sizeBytes=f.size_bytes,
-            durationSeconds=f.duration_seconds,
-            width=f.width,
-            height=f.height,
-            thumbnailUrl=f.thumbnail_url,
-            driveUrl=f.drive_url,
-            indexingStatus=f.indexing_status,
-            similarityScore=score,
-        )
-        for f, score in results
-    ]
-    flush_langfuse()
-    return SemanticSearchResponse(
-        files=response_files,
-        totalCount=len(response_files),
-        query=q,
-    )
-
+# --- Search Endpoints ---
 
 @router.get("/search", response_model=SearchResponse)
 async def search_files(
@@ -825,7 +689,7 @@ async def generate_missing_vision_embeddings(
     Generate vision embeddings for files that don't have them yet.
     
     This endpoint processes files with thumbnails in batches and generates
-    CLIP embeddings using Azure AI Vision.
+    Gemini Embedding 2 vectors via Google AI Studio.
     
     Call this endpoint to backfill vision embeddings for files that were
     indexed before vision embedding generation was enabled.
@@ -884,7 +748,7 @@ async def vision_search_files(
     """
     Search indexed files using vision semantic similarity.
     
-    Uses CLIP embeddings to find files with visually similar thumbnails
+    Uses Gemini Embedding 2 to find files with visually similar thumbnails
     to the search query concept. This enables finding files based on
     visual content rather than filename.
     
@@ -955,7 +819,7 @@ async def vision_hybrid_search_files(
     """
     Hybrid search combining text-based and vision semantic search with reranking.
     
-    Combines results from substring/trigram text search and CLIP vision search
+    Combines results from substring/trigram text search and Gemini vision search
     using weighted score fusion for better relevance ranking.
     
     Formula: hybrid_score = text_weight * normalized_text_score + vision_weight * normalized_vision_score

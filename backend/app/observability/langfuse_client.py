@@ -55,7 +55,7 @@ def trace_retrieval(
     metadata: Optional[dict[str, Any]] = None,
 ) -> Generator[Optional[Any], None, None]:
     """
-    Context manager for a top-level retrieval trace (e.g. semantic_search, vision_hybrid_search).
+    Context manager for a top-level retrieval trace (e.g. vision_hybrid_search).
     Uses start_as_current_observation so the first span is the trace root. Records duration.
     No-ops when Langfuse is not configured.
     """

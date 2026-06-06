@@ -1,17 +1,17 @@
 """
 Script to backfill vision embeddings for all records in indexed_files table.
 
-This script generates CLIP embeddings from thumbnail images for files that
-don't have vision embeddings yet.
+This script generates Gemini Embedding 2 vectors from thumbnail images for files
+that don't have vision embeddings yet.
 
 Usage:
     cd backend
     python backfill_vision_embeddings.py [batch_size]
 
-Make sure your .env file has the Azure AI Vision credentials set:
-    - AZURE_AI_VISION_ENDPOINT
-    - AZURE_AI_VISION_KEY
-    - AZURE_AI_VISION_DEPLOYMENT_NAME (optional, defaults to "openai-clip-image-text-embedd")
+Make sure your .env file has Gemini API credentials set:
+    - GEMINI_API_KEY (or GOOGLE_AI_VISION_API_KEY)
+    - GEMINI_EMBEDDING_MODEL (optional, defaults to gemini-embedding-2)
+    - GEMINI_EMBEDDING_DIMENSION (optional, defaults to 768)
 
 Note: This script requires users to have valid Google access tokens stored
 in the database to fetch fresh thumbnail URLs from Google Drive.
@@ -111,11 +111,11 @@ async def backfill_all_vision_embeddings(batch_size: int = 50):
     # Check if vision embedding service is configured
     vision_service = get_vision_embedding_service()
     if not vision_service.is_configured:
-        print("ERROR: Azure AI Vision credentials not configured in .env file.")
+        print("ERROR: Gemini Embedding 2 credentials not configured in .env file.")
         print("Required environment variables:")
-        print("  - AZURE_AI_VISION_ENDPOINT")
-        print("  - AZURE_AI_VISION_KEY")
-        print("  - AZURE_AI_VISION_DEPLOYMENT_NAME (optional, defaults to 'openai-clip-image-text-embedd')")
+        print("  - GEMINI_API_KEY (or GOOGLE_AI_VISION_API_KEY)")
+        print("  - GEMINI_EMBEDDING_MODEL (optional, defaults to gemini-embedding-2)")
+        print("  - GEMINI_EMBEDDING_DIMENSION (optional, defaults to 768)")
         return
     
     print("Starting vision embedding backfill process...")
