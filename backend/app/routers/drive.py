@@ -622,126 +622,6 @@ async def semantic_search_files(
     )
 
 
-class HybridSearchFileInfo(BaseModel):
-    """File information for hybrid search results with all score components."""
-    id: UUID
-    driveFileId: str
-    filename: str
-    mimeType: str
-    fileType: str
-    sizeBytes: int
-    durationSeconds: Optional[float] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
-    thumbnailUrl: Optional[str] = None
-    driveUrl: Optional[str] = None
-    indexingStatus: str
-    textScore: float
-    semanticScore: float
-    hybridScore: float
-
-    class Config:
-        from_attributes = True
-
-
-class HybridSearchResponse(BaseModel):
-    """Response for hybrid file search."""
-    files: list[HybridSearchFileInfo]
-    totalCount: int
-    query: str
-    textWeight: float
-    semanticWeight: float
-
-
-@router.get("/search/hybrid", response_model=HybridSearchResponse)
-async def hybrid_search_files(
-    q: str = "",
-    file_type: Optional[str] = None,
-    limit: int = 50,
-    text_weight: float = 0.7,
-    semantic_weight: float = 0.3,
-    user: User = Depends(current_active_user),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """
-    Hybrid search combining text-based and semantic search with reranking.
-    
-    Combines results from substring/trigram text search and vector semantic search
-    using weighted score fusion for better relevance ranking.
-    
-    Formula: hybrid_score = text_weight * normalized_text_score + semantic_weight * normalized_semantic_score
-    
-    Args:
-        q: Search query (required)
-        file_type: Optional filter by file type ("video" or "image")
-        limit: Maximum number of results to return (default 50, max 100)
-        text_weight: Weight for text search scores (default 0.7, range 0-1)
-        semantic_weight: Weight for semantic search scores (default 0.3, range 0-1)
-    
-    Returns:
-        List of matching files with text, semantic, and hybrid scores,
-        ordered by hybrid score from highest to lowest
-    """
-    if not q or not q.strip():
-        return HybridSearchResponse(
-            files=[],
-            totalCount=0,
-            query=q,
-            textWeight=text_weight,
-            semanticWeight=semantic_weight,
-        )
-    
-    # Validate weights
-    if text_weight < 0 or text_weight > 1:
-        text_weight = 0.7
-    if semantic_weight < 0 or semantic_weight > 1:
-        semantic_weight = 0.3
-    
-    # Cap limit at 100
-    limit = min(limit, 100)
-
-    with trace_retrieval("hybrid_search", metadata={"query": q[:100], "limit": limit}):
-        indexing_service = IndexingService(session)
-        results = await indexing_service.hybrid_search(
-            user_id=user.id,
-            query=q,
-            file_type=file_type,
-            limit=limit,
-            text_weight=text_weight,
-            semantic_weight=semantic_weight,
-        )
-
-    # Convert to response format
-    response_files = [
-        HybridSearchFileInfo(
-            id=f.id,
-            driveFileId=f.drive_file_id,
-            filename=f.filename,
-            mimeType=f.mime_type,
-            fileType=f.file_type,
-            sizeBytes=f.size_bytes,
-            durationSeconds=f.duration_seconds,
-            width=f.width,
-            height=f.height,
-            thumbnailUrl=f.thumbnail_url,
-            driveUrl=f.drive_url,
-            indexingStatus=f.indexing_status,
-            textScore=text_score,
-            semanticScore=semantic_score,
-            hybridScore=hybrid_score,
-        )
-        for f, text_score, semantic_score, hybrid_score in results
-    ]
-    flush_langfuse()
-    return HybridSearchResponse(
-        files=response_files,
-        totalCount=len(response_files),
-        query=q,
-        textWeight=text_weight,
-        semanticWeight=semantic_weight,
-    )
-
-
 @router.get("/search", response_model=SearchResponse)
 async def search_files(
     q: str = "",
@@ -1109,7 +989,16 @@ async def vision_hybrid_search_files(
     # Cap limit at 100
     limit = min(limit, 100)
 
-    with trace_retrieval("vision_hybrid_search", metadata={"query": q[:100], "limit": limit}):
+    with trace_retrieval(
+        "vision_hybrid_search",
+        metadata={
+            "query": q[:100],
+            "limit": limit,
+            "text_weight": text_weight,
+            "vision_weight": vision_weight,
+            "file_type": file_type,
+        },
+    ) as span:
         indexing_service = IndexingService(session)
         results = await indexing_service.vision_hybrid_search_unified(
             user_id=user.id,
@@ -1119,6 +1008,23 @@ async def vision_hybrid_search_files(
             text_weight=text_weight,
             vision_weight=vision_weight,
         )
+        if span:
+            span.update(
+                metadata={
+                    "result_count": len(results),
+                    "top_results": [
+                        {
+                            "file_id": str(f.id),
+                            "filename": f.filename[:80],
+                            "text_score": round(text_score, 4),
+                            "vision_score": round(vision_score, 4),
+                            "hybrid_score": round(hybrid_score, 4),
+                            "matched_frame": mf is not None,
+                        }
+                        for f, text_score, vision_score, hybrid_score, mf in results[:5]
+                    ],
+                }
+            )
     
     # Convert to response format (include matchedFrame for video frame hits)
     response_files = [

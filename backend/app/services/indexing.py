@@ -1,5 +1,6 @@
 """Indexing service for managing indexed files in the database."""
 
+import asyncio
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -474,12 +475,14 @@ class IndexingService:
         stmt = select(IndexedFile, similarity_score.label("score")).where(
             and_(*conditions)
         ).order_by(desc("score"), IndexedFile.filename).limit(limit)
-        
-        result = await self.session.execute(stmt)
-        rows = result.all()
-        
-        # Return tuples of (file, score)
-        return [(row[0], float(row[1])) for row in rows]
+
+        with trace_vector_search("trigram_filename_search", metadata={"limit": limit}) as span:
+            result = await self.session.execute(stmt)
+            rows = result.all()
+            results = [(row[0], float(row[1])) for row in rows]
+            if span:
+                span.update(metadata={"result_count": len(results)})
+            return results
     
     async def get_files_without_embeddings(
         self,
@@ -670,126 +673,6 @@ class IndexingService:
             return [1.0] * len(scores)
         
         return [(s - min_score) / (max_score - min_score) for s in scores]
-    
-    async def hybrid_search(
-        self,
-        user_id: UUID,
-        query: str,
-        file_type: Optional[str] = None,
-        limit: int = 50,
-        text_weight: float = 0.7,
-        semantic_weight: float = 0.3
-    ) -> list[tuple[IndexedFile, float, float, float]]:
-        """
-        Perform hybrid search combining text-based and semantic search with reranking.
-        
-        Uses weighted score fusion to combine results from:
-        - Text search (trigram similarity on filename)
-        - Semantic search (cosine similarity on embeddings)
-        
-        Formula: hybrid_score = text_weight * normalized_text_score + semantic_weight * normalized_semantic_score
-        
-        Args:
-            user_id: User UUID
-            query: Search query text
-            file_type: Optional filter by file type ("video" or "image")
-            limit: Maximum number of results to return
-            text_weight: Weight for text search scores (default 0.7)
-            semantic_weight: Weight for semantic search scores (default 0.3)
-        
-        Returns:
-            List of tuples (IndexedFile, text_score, semantic_score, hybrid_score),
-            ordered by hybrid_score descending (highest to lowest)
-        """
-        if not query or not query.strip():
-            return []
-        
-        # Run both searches in parallel conceptually, but sequentially for simplicity
-        # Fetch more results than needed since we'll merge and re-rank
-        fetch_limit = limit * 2
-        
-        # Get text search results with scores
-        text_results = await self.search_files_with_scores(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit
-        )
-        
-        # Get semantic search results with scores
-        semantic_results = await self.semantic_search(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-            similarity_threshold=0.0  # Get all results, we'll filter later
-        )
-        
-        # Create lookup dictionaries by file ID
-        text_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
-            f.id: (f, score) for f, score in text_results
-        }
-        semantic_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
-            f.id: (f, score) for f, score in semantic_results
-        }
-        
-        # Get all unique file IDs
-        all_file_ids = set(text_scores_by_id.keys()) | set(semantic_scores_by_id.keys())
-        
-        if not all_file_ids:
-            return []
-        
-        # Collect raw scores for normalization
-        text_raw_scores = [score for _, score in text_results] if text_results else [0.0]
-        semantic_raw_scores = [score for _, score in semantic_results] if semantic_results else [0.0]
-        
-        # Calculate min/max for normalization
-        text_min = min(text_raw_scores) if text_raw_scores else 0.0
-        text_max = max(text_raw_scores) if text_raw_scores else 1.0
-        semantic_min = min(semantic_raw_scores) if semantic_raw_scores else 0.0
-        semantic_max = max(semantic_raw_scores) if semantic_raw_scores else 1.0
-        
-        def normalize_text(score: float) -> float:
-            if text_max == text_min:
-                return 1.0 if text_results else 0.0
-            return (score - text_min) / (text_max - text_min)
-        
-        def normalize_semantic(score: float) -> float:
-            if semantic_max == semantic_min:
-                return 1.0 if semantic_results else 0.0
-            return (score - semantic_min) / (semantic_max - semantic_min)
-        
-        # Build combined results
-        combined_results: list[tuple[IndexedFile, float, float, float]] = []
-        
-        for file_id in all_file_ids:
-            # Get file object (prefer text result, fallback to semantic)
-            if file_id in text_scores_by_id:
-                file, text_score = text_scores_by_id[file_id]
-            else:
-                file, _ = semantic_scores_by_id[file_id]
-                text_score = 0.0
-            
-            # Get semantic score (0 if not found)
-            if file_id in semantic_scores_by_id:
-                _, semantic_score = semantic_scores_by_id[file_id]
-            else:
-                semantic_score = 0.0
-            
-            # Normalize scores
-            norm_text = normalize_text(text_score) if text_score > 0 else 0.0
-            norm_semantic = normalize_semantic(semantic_score) if semantic_score > 0 else 0.0
-            
-            # Calculate hybrid score
-            hybrid_score = (text_weight * norm_text) + (semantic_weight * norm_semantic)
-            
-            combined_results.append((file, norm_text, norm_semantic, hybrid_score))
-        
-        # Sort by hybrid score descending (highest to lowest)
-        combined_results.sort(key=lambda x: x[3], reverse=True)
-        
-        # Return top N results
-        return combined_results[:limit]
     
     # ==========================================================================
     # Vision Embedding Methods
@@ -1074,14 +957,17 @@ class IndexingService:
             .order_by(cosine_distance)
             .limit(limit)
         )
-        result = await self.session.execute(stmt)
-        rows = result.all()
-        out = []
-        for row in rows:
-            file, frame, score = row
-            if score >= similarity_threshold:
-                out.append((file, frame, float(score)))
-        return out
+        with trace_vector_search("vision_video_frame_search", metadata={"limit": limit}) as span:
+            result = await self.session.execute(stmt)
+            rows = result.all()
+            out = []
+            for row in rows:
+                file, frame, score = row
+                if score >= similarity_threshold:
+                    out.append((file, frame, float(score)))
+            if span:
+                span.update(metadata={"result_count": len(out)})
+            return out
 
     async def vision_semantic_search_unified(
         self,
@@ -1137,125 +1023,6 @@ class IndexingService:
         merged.sort(key=lambda x: x[1], reverse=True)
         return merged[:limit]
 
-    async def vision_hybrid_search(
-        self,
-        user_id: UUID,
-        query: str,
-        file_type: Optional[str] = None,
-        limit: int = 50,
-        text_weight: float = 0.5,
-        vision_weight: float = 0.5
-    ) -> list[tuple[IndexedFile, float, float, float]]:
-        """
-        Perform hybrid search combining text-based and vision semantic search.
-        
-        Uses weighted score fusion to combine results from:
-        - Text search (trigram similarity on filename)
-        - Vision search (cosine similarity on CLIP embeddings)
-        
-        Formula: hybrid_score = text_weight * normalized_text_score + vision_weight * normalized_vision_score
-        
-        Args:
-            user_id: User UUID
-            query: Search query text
-            file_type: Optional filter by file type ("video" or "image")
-            limit: Maximum number of results to return
-            text_weight: Weight for text search scores (default 0.5)
-            vision_weight: Weight for vision search scores (default 0.5)
-        
-        Returns:
-            List of tuples (IndexedFile, text_score, vision_score, hybrid_score),
-            ordered by hybrid_score descending
-        """
-        if not query or not query.strip():
-            return []
-        
-        # Fetch more results than needed since we'll merge and re-rank
-        fetch_limit = limit * 2
-        
-        # Get text search results with scores
-        text_results = await self.search_files_with_scores(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit
-        )
-        
-        # Get vision search results with scores
-        vision_results = await self.vision_semantic_search(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-            similarity_threshold=0.0
-        )
-        
-        # Create lookup dictionaries by file ID
-        text_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
-            f.id: (f, score) for f, score in text_results
-        }
-        vision_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
-            f.id: (f, score) for f, score in vision_results
-        }
-        
-        # Get all unique file IDs
-        all_file_ids = set(text_scores_by_id.keys()) | set(vision_scores_by_id.keys())
-        
-        if not all_file_ids:
-            return []
-        
-        # Collect raw scores for normalization
-        text_raw_scores = [score for _, score in text_results] if text_results else [0.0]
-        vision_raw_scores = [score for _, score in vision_results] if vision_results else [0.0]
-        
-        # Calculate min/max for normalization
-        text_min = min(text_raw_scores) if text_raw_scores else 0.0
-        text_max = max(text_raw_scores) if text_raw_scores else 1.0
-        vision_min = min(vision_raw_scores) if vision_raw_scores else 0.0
-        vision_max = max(vision_raw_scores) if vision_raw_scores else 1.0
-        
-        def normalize_text(score: float) -> float:
-            if text_max == text_min:
-                return 1.0 if text_results else 0.0
-            return (score - text_min) / (text_max - text_min)
-        
-        def normalize_vision(score: float) -> float:
-            if vision_max == vision_min:
-                return 1.0 if vision_results else 0.0
-            return (score - vision_min) / (vision_max - vision_min)
-        
-        # Build combined results
-        combined_results: list[tuple[IndexedFile, float, float, float]] = []
-        
-        for file_id in all_file_ids:
-            # Get file object (prefer text result, fallback to vision)
-            if file_id in text_scores_by_id:
-                file, text_score = text_scores_by_id[file_id]
-            else:
-                file, _ = vision_scores_by_id[file_id]
-                text_score = 0.0
-            
-            # Get vision score (0 if not found)
-            if file_id in vision_scores_by_id:
-                _, vision_score = vision_scores_by_id[file_id]
-            else:
-                vision_score = 0.0
-            
-            # Normalize scores
-            norm_text = normalize_text(text_score) if text_score > 0 else 0.0
-            norm_vision = normalize_vision(vision_score) if vision_score > 0 else 0.0
-            
-            # Calculate hybrid score
-            hybrid_score = (text_weight * norm_text) + (vision_weight * norm_vision)
-            
-            combined_results.append((file, norm_text, norm_vision, hybrid_score))
-        
-        # Sort by hybrid score descending
-        combined_results.sort(key=lambda x: x[3], reverse=True)
-        
-        # Return top N results
-        return combined_results[:limit]
-
     async def vision_hybrid_search_unified(
         self,
         user_id: UUID,
@@ -1273,18 +1040,20 @@ class IndexingService:
         if not query or not query.strip():
             return []
         fetch_limit = limit * 2
-        text_results = await self.search_files_with_scores(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-        )
-        vision_results = await self.vision_semantic_search_unified(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-            similarity_threshold=0.0,
+        text_results, vision_results = await asyncio.gather(
+            self.search_files_with_scores(
+                user_id=user_id,
+                query=query,
+                file_type=file_type,
+                limit=fetch_limit,
+            ),
+            self.vision_semantic_search_unified(
+                user_id=user_id,
+                query=query,
+                file_type=file_type,
+                limit=fetch_limit,
+                similarity_threshold=0.0,
+            ),
         )
         text_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
             f.id: (f, score) for f, score in text_results

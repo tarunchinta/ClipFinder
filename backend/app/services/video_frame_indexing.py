@@ -1,6 +1,7 @@
 """Video frame extraction, embedding, and storage for per-frame video search."""
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -296,7 +297,11 @@ async def run_frame_indexing_for_video(
         with open(video_path, "wb") as f:
             f.write(video_bytes)
 
-        frames = _extract_frames_ffmpeg(video_path, tmpdir, FRAME_INTERVAL)
+        loop = asyncio.get_running_loop()
+        frames = await loop.run_in_executor(
+            None,
+            functools.partial(_extract_frames_ffmpeg, video_path, tmpdir, FRAME_INTERVAL),
+        )
         if not frames:
             result["error"] = "No frames extracted (ffmpeg failed or no frames)"
             # #region agent log
@@ -332,16 +337,24 @@ async def run_frame_indexing_for_video(
 
                 path_in_bucket = f"{row.user_id}/{video_id}/frame_{frame_index:05d}.jpg"
                 if settings.azure_blob_connection_string:
-                    frame_image_url = _upload_frame_to_azure_blob(
-                        settings.azure_blob_container_name,
-                        path_in_bucket,
-                        image_bytes,
+                    frame_image_url = await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            _upload_frame_to_azure_blob,
+                            settings.azure_blob_container_name,
+                            path_in_bucket,
+                            image_bytes,
+                        ),
                     )
                 elif settings.supabase_url and settings.supabase_key:
-                    frame_image_url = _upload_frame_to_supabase(
-                        settings.supabase_storage_bucket,
-                        path_in_bucket,
-                        image_bytes,
+                    frame_image_url = await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            _upload_frame_to_supabase,
+                            settings.supabase_storage_bucket,
+                            path_in_bucket,
+                            image_bytes,
+                        ),
                     )
                 else:
                     frame_image_url = None
