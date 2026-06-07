@@ -57,6 +57,10 @@ BLOB_SAS_EXPIRY_HOURS = 100
 # Extract every 5th frame (frame indices 0, 5, 10, ...)
 FRAME_INTERVAL = 5
 
+# Downsample frames during ffmpeg extract (~CLIP input size; saves blob/API payload)
+FRAME_MAX_DIMENSION = 336
+FRAME_JPEG_QUALITY = 5
+
 
 @dataclass(frozen=True)
 class ExtractedFrame:
@@ -129,9 +133,13 @@ def _get_video_fps(video_path: str) -> float:
 
 def _extract_frames_ffmpeg(video_path: str, out_dir: str, every_n: int = FRAME_INTERVAL) -> list[tuple[int, float, str]]:
     """
-    Extract every Nth frame from video. Returns list of (frame_index, time_seconds, path_to_jpeg).
+    Extract every Nth frame from video, downsampled to FRAME_MAX_DIMENSION max side.
+    Returns list of (frame_index, time_seconds, path_to_jpeg).
     """
-    vf = f"select=not(mod(n\\,{every_n}))"
+    vf = (
+        f"select=not(mod(n\\,{every_n})),"
+        f"scale={FRAME_MAX_DIMENSION}:{FRAME_MAX_DIMENSION}:force_original_aspect_ratio=decrease"
+    )
     pattern = os.path.join(out_dir, "frame_%04d.jpg")
     try:
         subprocess.run(
@@ -140,6 +148,7 @@ def _extract_frames_ffmpeg(video_path: str, out_dir: str, every_n: int = FRAME_I
                 "-vf", vf,
                 "-vsync", "vfr",
                 "-frame_pts", "1",
+                "-q:v", str(FRAME_JPEG_QUALITY),
                 pattern,
             ],
             capture_output=True,

@@ -33,6 +33,15 @@ SEARCH_QUERY_PREFIX = "task: search result | query: "
 
 VISION_EMBEDDING_DIMENSION = 768
 
+DRIVE_THUMBNAIL_MAX_PX = 336
+
+
+def normalize_drive_thumbnail_url(url: str, max_px: int = DRIVE_THUMBNAIL_MAX_PX) -> str:
+    """Rewrite Google Drive thumbnail URL size param (e.g. =s220 -> =s336)."""
+    if "=s" in url:
+        return url.rsplit("=s", 1)[0] + f"=s{max_px}"
+    return url
+
 
 def _detect_image_mime_type(image_bytes: bytes) -> str:
     """Detect JPEG or PNG from magic bytes; default to JPEG for ffmpeg frames."""
@@ -165,9 +174,7 @@ class VisionEmbeddingService:
                 thumbnail_url = data.get("thumbnailLink")
 
                 if thumbnail_url:
-                    if "=s" in thumbnail_url:
-                        thumbnail_url = thumbnail_url.rsplit("=s", 1)[0] + "=s400"
-                    return thumbnail_url
+                    return normalize_drive_thumbnail_url(thumbnail_url)
                 return None
         except httpx.HTTPStatusError as e:
             logger.error(f"Google Drive API error getting thumbnail: {e.response.status_code}")

@@ -20,6 +20,7 @@ from app.observability import flush_langfuse, trace_batch_upload, trace_retrieva
 from app.services.google_auth import get_valid_access_token
 from app.services.google_drive import GoogleDriveService, MAX_CLIPS_PER_FOLDER
 from app.services.indexing import IndexingService
+from app.services.vision_embedding import normalize_drive_thumbnail_url
 
 logger = logging.getLogger(__name__)
 
@@ -119,10 +120,8 @@ async def get_thumbnail(
                 detail="No thumbnail available for this file",
             )
         
-        # Increase thumbnail size by modifying the URL (default is small)
-        # Google thumbnail URLs have =s220 or similar, we can change to =s400
-        if "=s" in thumbnail_url:
-            thumbnail_url = thumbnail_url.rsplit("=s", 1)[0] + "=s400"
+        # Request a larger thumbnail (default is small); capped at 336px for embedding alignment
+        thumbnail_url = normalize_drive_thumbnail_url(thumbnail_url)
         
         # Fetch the thumbnail - Google's lh3.googleusercontent.com URLs 
         # don't need auth once we have the link
