@@ -27,6 +27,9 @@ env
 dist
 build
 
+# Large local media used for demos/testing
+*.mp4
+
 # Local config and secrets
 .env
 *.local

@@ -114,3 +114,7 @@ coverage/
 .pyright/
 .python-version
 .tool-versions
+
+# Azure Functions local artifacts
+local.settings.json
+.python_packages/

@@ -36,56 +36,64 @@ ClipFinder is a single **FastAPI** service. After a user signs in with Google (r
    ┌──────────┐  list/    │   ┌─────────────────┴──────────────────┐      │
    │  Google  │  download │   │            Indexing                │      │
    │  Drive   │◀──────────┼──▶│  • upsert file metadata            │      │
-   └──────────┘           │   │  • CLIP embed thumbnails (images)  │      │
-        ▲                 │   │  • ffmpeg → frames → CLIP embed    │──┐   │
-        │ frames stored   │   │  • text-embed filenames            │  │   │
-        │                 │   └────────────────────────────────────┘  │   │
-   ┌──────────┐           │   ┌────────────────────────────────────┐  │   │
-   │  Blob     │◀─────────┼───│            Search                  │  │   │
-   │  storage  │  frame    │   │  query ─┬─ pg_trgm (filenames)     │  │   │
-   │ (Azure/   │  JPEGs    │   │         └─ CLIP text→image (visual)│  │   │
-   │  Supabase)│           │   │     fuse → ranked frames + files   │  │   │
-   └──────────┘           │   └────────────────────────────────────┘  │   │
+   └──────────┘           │   │  • Gemini embed thumbnails (images)│      │
+        ▲                 │   │  • ffmpeg → frames → Gemini embed  │──┐   │
+        │ frames stored   │   │  • ffmpeg audio → WhisperX →       │  │   │
+        │                 │   │    word-timed segments + embeddings│  │   │
+   ┌──────────┐           │   └────────────────────────────────────┘  │   │
+   │  Blob     │◀─────────┼───┌────────────────────────────────────┐  │   │
+   │  storage  │  frame    │   │            Search                  │  │   │
+   │ (Azure/   │  JPEGs    │   │  query ─┬─ pg_trgm (filenames)     │  │   │
+   │  Supabase)│           │   │         ├─ Gemini text→image (visual)│  │   │
+   └──────────┘           │   │         ├─ FTS (transcript text)   │  │   │
+                          │   │         └─ Gemini text→transcript  │  │   │
+                          │   │   RRF fuse → ranked files + times  │  │   │
+                          │   └────────────────────────────────────┘  │   │
                           │                     │                      │   │
                           └─────────────────────┼──────────────────────┼───┘
                                                  ▼                      ▼
                                        ┌───────────────────────────────────┐
                                        │   Postgres 16 + pgvector          │
                                        │   • indexed_files                 │
-                                       │       filename_embedding  (1536)  │
                                        │       vision_embedding    (768)   │
                                        │   • video_frame_embeddings (768)  │
-                                       │   HNSW (cosine) + pg_trgm GIN     │
+                                       │   • video_transcript_segments     │
+                                       │       text + timestamps + (768)   │
+                                       │   HNSW (cosine) + GIN (trgm, FTS) │
                                        └───────────────────────────────────┘
 ```
 
 ### Indexing Pipeline
 
 1. **List & validate** files in the selected folder via the Drive API (images + videos, ≤100 MB, videos ≤30 s).
-2. **Images:** download the Drive thumbnail and embed it with CLIP → a 768-dim `vision_embedding`.
-3. **Videos:** download the file, run **ffmpeg** server-side to sample frames (every 5th frame), embed each frame with CLIP, and store per-frame embeddings with their **timestamp** so search can deep-link into the exact moment. Frame JPEGs are persisted to blob storage (Azure Blob preferred, Supabase Storage as fallback).
-4. **Filenames** are embedded with `text-embedding-3-small` and stored alongside metadata.
+2. **Images:** download the Drive thumbnail and embed it with Gemini Embedding 2 → a 768-dim `vision_embedding`.
+3. **Videos:** download the file, run **ffmpeg** server-side to sample frames (every 5th frame), embed each frame with Gemini Embedding 2, and store per-frame embeddings with their **timestamp** so search can deep-link into the exact moment. Frame JPEGs are persisted to blob storage (Azure Blob preferred, Supabase Storage as fallback).
+4. **Transcription (runs alongside frame embedding):** extract the audio track with ffmpeg and transcribe it locally with **WhisperX** (batched Whisper ASR + wav2vec2 forced alignment, CPU/int8). Each speech segment is stored with its **text, segment timestamps, and word-level timestamps**, plus a Gemini text embedding, so spoken words are searchable both lexically and semantically — and results deep-link to the exact word.
 5. Heavy video work is offloaded to an **in-process `asyncio` background task** so the index request returns quickly.
 
 ### Retrieval
 
-The shipped search path is **hybrid**: it fuses a lexical signal over filenames with a dense visual signal over image/frame embeddings.
+The shipped search path is **hybrid**: four retrieval legs are fused with **Reciprocal Rank Fusion (RRF)**.
 
-- **Lexical leg** — Postgres `pg_trgm` trigram similarity on filenames.
-- **Visual leg** — the query text is embedded with **CLIP's text encoder** and compared (cosine) against image and video-frame embeddings via **pgvector**. Because CLIP maps text and images into a *shared* vector space, a text query can be matched directly against pixels.
-- **Fusion** — each leg's scores are min-max normalized and combined with a weighted sum, then re-ranked. Video matches surface the specific frame and its timestamp.
+- **Filename leg** — Postgres `pg_trgm` trigram similarity on filenames.
+- **Visual leg** — the query text is embedded with **Gemini Embedding 2** and compared (cosine) against image and video-frame embeddings via **pgvector**. Because Gemini maps text and images into a *shared* vector space, a text query can be matched directly against pixels.
+- **Transcript lexical leg** — Postgres full-text search (`websearch_to_tsquery` + `ts_rank`, GIN-indexed) over transcript segments; if a clip *says* the query words, it matches here.
+- **Transcript semantic leg** — the same query embedding compared (cosine) against per-segment transcript embeddings, so paraphrased speech still matches.
+- **Fusion** — each leg contributes `1 / (k + rank)` per file (k = 60) and the sums are re-ranked, so a strong rank on any single leg (e.g. an exact spoken phrase) surfaces the clip near the top. Video matches carry the matched frame and/or transcript segment with its timestamp for deep-linking.
 
 ---
 
 ## Key Engineering Decisions & Tradeoffs
 
-**CLIP for cross-modal retrieval.** CLIP embeds images and text into one shared space, so a text query can be compared directly to image embeddings via similarity search, with no captioning or object-detection step in between.
+**Gemini Embedding 2 for cross-modal retrieval.** Gemini Embedding 2 maps images and text into one shared space, so a text query can be compared directly to image embeddings via similarity search, with no captioning or object-detection step in between.
 
-**Hybrid retrieval, without a semantic filename leg.** The pipeline can embed filenames semantically and an endpoint for it exists, but in testing filenames were already lexically close to their content and CLIP visual retrieval surfaced the same results. The shipped search therefore fuses lexical filename matching (`pg_trgm`) with CLIP visual search, keeping the cheap signal cheap and spending the expensive signal on pixels.
+**Hybrid retrieval with RRF.** The shipped search fuses lexical filename matching (`pg_trgm`), Gemini visual search, and lexical + semantic transcript search using Reciprocal Rank Fusion. RRF combines legs by rank rather than raw score, so heterogeneous signals (trigram similarity, `ts_rank`, cosine similarity) need no score calibration to be fused fairly.
+
+**Local WhisperX for transcription.** Audio is transcribed with **WhisperX** (Whisper *tiny* ASR + wav2vec2 forced alignment, CPU/int8) during indexing — no extra API cost, and clips ≤30 s transcribe in seconds. Word-level timestamps let transcript hits deep-link to the exact moment a searched word is spoken, not just the segment it appears in.
 
 **Postgres + pgvector instead of a dedicated vector DB.** One datastore holds metadata, lexical indexes (`pg_trgm` GIN), and vector indexes (HNSW, cosine). This removes a moving part, keeps writes transactional, and stays portable to any managed Postgres (Supabase, Neon, RDS).
 
-**Hosted embedding endpoints instead of local model weights.** Both encoders are called over HTTP — `text-embedding-3-small` via Azure OpenAI (1536-dim) and OpenAI's CLIP hosted on Azure ML (768-dim). This keeps the app container small and CPU-only and lets the model deployment scale independently. The tradeoff is per-call latency and a dependency on endpoint availability, which the indexing layer absorbs by running asynchronously.
+**Hosted embedding endpoint instead of local model weights.** Gemini Embedding 2 is called over HTTP via Google AI Studio (768-dim). This keeps the app container small and CPU-only and lets the model deployment scale independently. The tradeoff is per-call latency and a dependency on endpoint availability, which the indexing layer absorbs by running asynchronously.
 
 **Frame sampling over full decode.** Sampling every 5th frame keeps embedding volume and storage proportional to motion while still capturing distinct moments. Each frame keeps its computed timestamp so results jump straight to the moment in Drive.
 
@@ -101,9 +109,9 @@ The shipped search path is **hybrid**: it fuses a lexical signal over filenames 
 | UI | Server-rendered Jinja2 | Landing, dashboard (Drive picker), search |
 | Auth | fastapi-users + Google OAuth2 | `drive.readonly` scope, JWT cookie session |
 | Database | PostgreSQL 16 + pgvector | HNSW (cosine) vector indexes + `pg_trgm` GIN |
-| Text embeddings | Azure OpenAI `text-embedding-3-small` | 1536-dim, over HTTP |
-| Visual embeddings | OpenAI CLIP on Azure ML | 768-dim image & text encoders, shared space |
-| Video | ffmpeg / ffprobe (subprocess) | Frame sampling + timestamps |
+| Visual embeddings | Gemini Embedding 2 (Google AI Studio) | 768-dim multimodal, shared space |
+| Transcription | WhisperX (Whisper tiny + wav2vec2 alignment) | Word-level timestamps, local CPU/int8 inference |
+| Video | ffmpeg / ffprobe (subprocess) | Frame sampling, audio extraction + timestamps |
 | Frame storage | Azure Blob / Supabase | SAS-signed frame image URLs |
 | Async | `asyncio` background tasks | Service Bus producer path available |
 | Observability | Langfuse | Traces embedding + retrieval calls |
@@ -113,8 +121,8 @@ The shipped search path is **hybrid**: it fuses a lexical signal over filenames 
 
 ## Scope and Limitations
 
-- Search is lexical (filenames) + CLIP visual; transcript/audio search is not implemented.
-- Video frame indexing requires `ffmpeg` on the host and configured Azure embedding/blob credentials.
+- Transcription uses WhisperX with the Whisper *tiny* model — fast and free, but ASR accuracy is below larger Whisper sizes (set `WHISPER_MODEL_SIZE` to trade speed for accuracy). Word-level alignment requires a wav2vec2 model for the detected language; unsupported languages fall back to segment-level timestamps.
+- Video frame indexing and transcription require `ffmpeg` on the host; frames also need configured embedding/blob credentials.
 - `indexing_status` reflects enqueue, not end-to-end per-file completion.
 - Stripe and usage-limit fields exist in config and schema but are not enforced.
 
@@ -128,7 +136,7 @@ The shipped search path is **hybrid**: it fuses a lexical signal over filenames 
 - PostgreSQL 16 with the `vector` and `pg_trgm` extensions (or use the included `docker-compose.yml`)
 - `ffmpeg` / `ffprobe` on your `PATH` (required for video frame indexing)
 - Google Cloud OAuth credentials (Drive API enabled)
-- Azure OpenAI + Azure ML CLIP endpoints for embeddings
+- Google AI Studio Gemini Embedding 2 API key
 
 ### Setup
 
@@ -155,10 +163,9 @@ GOOGLE_CLIENT_ID=...apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=...
 GOOGLE_API_KEY=...                       # for the Drive folder picker
 
-AZURE_OPENAI_ENDPOINT_SAMPLE_FULL=...    # full text-embedding endpoint URL
-AZURE_OPENAI_API_KEY=...
-AZURE_AI_VISION_ENDPOINT=...             # Azure ML CLIP /score endpoint
-AZURE_AI_VISION_KEY=...
+GEMINI_API_KEY=...                       # https://aistudio.google.com/apikey
+GEMINI_EMBEDDING_MODEL=gemini-embedding-2
+GEMINI_EMBEDDING_DIMENSION=768
 
 # One of the following for frame image storage:
 AZURE_BLOB_CONNECTION_STRING=...         # preferred
@@ -195,10 +202,10 @@ backend/
 │   ├── config.py               # pydantic-settings configuration
 │   ├── routers/                # auth, pages (Jinja), drive/search API
 │   ├── services/
-│   │   ├── embedding.py            # Azure OpenAI text embeddings (1536-d)
-│   │   ├── vision_embedding.py     # Azure ML CLIP image/text embeddings (768-d)
+│   │   ├── vision_embedding.py     # Gemini Embedding 2 image/text embeddings (768-d)
 │   │   ├── video_frame_indexing.py # ffmpeg frame extraction + embedding
-│   │   ├── indexing.py             # search: trigram + vector + hybrid fusion
+│   │   ├── transcription.py        # WhisperX transcription (segments + word timestamps)
+│   │   ├── indexing.py             # search: trigram + vector + transcript legs, RRF fusion
 │   │   └── google_drive.py         # Drive listing / download
 │   ├── templates/              # landing / dashboard / search UIs
 │   └── observability/          # Langfuse tracing

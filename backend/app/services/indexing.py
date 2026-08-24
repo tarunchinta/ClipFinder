@@ -1,10 +1,10 @@
 """Indexing service for managing indexed files in the database."""
 
-import asyncio
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
 import logging
+import re
 
 from sqlalchemy import select, and_, or_, func, desc, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.models.indexed_file import IndexedFile, IndexingStatus
 from app.models.video_frame_embedding import VideoFrameEmbedding
+from app.models.video_transcript_segment import VideoTranscriptSegment
 from app.observability import (
     get_current_observation_id,
     get_current_trace_id,
@@ -42,11 +43,9 @@ class IndexingService:
         google_account_id: str,
         folder_id: str,
         files: list[dict],
-        generate_vision_embeddings: bool = True,
-        google_access_token: Optional[str] = None,
-    ) -> tuple[list[IndexedFile], list[dict]]:
+    ) -> tuple[list[IndexedFile], list[dict], list[dict]]:
         """
-        Bulk insert/upsert files for indexing.
+        Bulk insert/upsert files for indexing (metadata only; vision jobs enqueued separately).
         
         Uses ON CONFLICT to handle re-indexing scenarios:
         - New files are inserted with status='pending'
@@ -57,31 +56,17 @@ class IndexingService:
             google_account_id: Google account ID from OAuth
             folder_id: Google Drive folder ID
             files: List of file metadata dicts from GoogleDriveService
-            generate_vision_embeddings: Whether to generate vision embeddings for thumbnails (default True)
-            google_access_token: Google OAuth token for fetching fresh thumbnail URLs
         
         Returns:
-            Tuple of (list of created/updated IndexedFile records, list of trace context dicts for videos).
-            video_trace_contexts[i] = {"trace_id", "parent_span_id"} for the i-th video in the batch (same order as videos in returned list).
+            Tuple of (indexed_files, video_trace_contexts, image_trace_contexts).
+            Trace context lists align with videos/images in the batch (same order as filtered file_type).
         """
         if not files:
-            return [], []
+            return [], [], []
         
-        # Resolve vision service once; per-file generation happens inside each span
-        vision_service = None
-        if generate_vision_embeddings and google_access_token:
-            vision_service = get_vision_embedding_service()
-            if not vision_service.is_configured:
-                logger.warning("Vision embedding service not configured, skipping vision embedding generation")
-                vision_service = None
-        elif generate_vision_embeddings and not google_access_token:
-            logger.warning("No Google access token provided, skipping vision embedding generation")
-        
-        # Per-file loop: each iteration opens a Langfuse span that captures
-        # real work (vision embedding download + CLIP API call for images).
         values = []
-        vision_embeddings: list[Optional[list[float]]] = [None] * len(files)
         video_trace_contexts: list[dict] = []
+        image_trace_contexts: list[dict] = []
         for i, file in enumerate(files):
             file_type = file.get("mediaType", "image")
             file_meta = {
@@ -90,18 +75,6 @@ class IndexingService:
                 "index_in_batch": i,
             }
             with trace_index_file(file_type, metadata=file_meta):
-                # Generate vision embedding for THIS file inside the span
-                if vision_service:
-                    thumbnail_url = file.get("thumbnailUrl")
-                    if thumbnail_url:
-                        vision_embeddings[i] = await vision_service.generate_embedding(
-                            thumbnail_url,
-                            mode="image",
-                            drive_file_id=file["id"],
-                            google_access_token=google_access_token,
-                        )
-
-                # Parse modified_time if present
                 modified_time = None
                 if file.get("modifiedTime"):
                     try:
@@ -111,11 +84,21 @@ class IndexingService:
                         modified_time = parsed_time.replace(tzinfo=None)
                     except (ValueError, TypeError):
                         logger.warning(f"Could not parse modifiedTime: {file.get('modifiedTime')}")
-                if file.get("mediaType") == "video":
-                    trace_id = get_current_trace_id()
-                    parent_span_id = get_current_observation_id()
-                    if trace_id and parent_span_id:
-                        video_trace_contexts.append({"trace_id": trace_id, "parent_span_id": parent_span_id})
+
+                trace_id = get_current_trace_id()
+                parent_span_id = get_current_observation_id()
+                if trace_id and parent_span_id:
+                    ctx = {"trace_id": trace_id, "parent_span_id": parent_span_id}
+                    if file_type == "video":
+                        video_trace_contexts.append(ctx)
+                    elif file_type == "image" and file.get("thumbnailUrl"):
+                        image_trace_contexts.append(ctx)
+
+                has_thumbnail = bool(file.get("thumbnailUrl"))
+                vision_indexing_status = None
+                if file_type == "image" and has_thumbnail:
+                    vision_indexing_status = IndexingStatus.PENDING.value
+
                 values.append({
                     "user_id": user_id,
                     "google_account_id": google_account_id,
@@ -133,9 +116,12 @@ class IndexingService:
                     "drive_url": file.get("driveUrl"),
                     "indexing_status": IndexingStatus.PENDING.value,
                     "error_message": None,
-                    "vision_embedding": vision_embeddings[i],
-                    "vision_indexing_status": IndexingStatus.COMPLETED.value if vision_embeddings[i] else None,
-                    "vision_indexed_at": datetime.utcnow() if vision_embeddings[i] else None,
+                    "vision_embedding": None,
+                    "vision_indexing_status": vision_indexing_status,
+                    "vision_indexed_at": None,
+                    "transcript_status": (
+                        IndexingStatus.PENDING.value if file_type == "video" else None
+                    ),
                     "created_at": datetime.utcnow(),
                     "updated_at": datetime.utcnow(),
                     "indexed_at": None,
@@ -164,6 +150,10 @@ class IndexingService:
                 "vision_embedding": stmt.excluded.vision_embedding,
                 "vision_indexing_status": stmt.excluded.vision_indexing_status,
                 "vision_indexed_at": stmt.excluded.vision_indexed_at,
+                "transcript_status": stmt.excluded.transcript_status,
+                "frames_total": None,
+                "frames_completed": 0,
+                "frames_failed": 0,
                 "updated_at": datetime.utcnow(),
                 "indexed_at": None,
             }
@@ -172,7 +162,7 @@ class IndexingService:
         result = await self.session.execute(stmt)
         await self.session.commit()
         indexed_files = list(result.scalars().all())
-        return indexed_files, video_trace_contexts
+        return indexed_files, video_trace_contexts, image_trace_contexts
     
     async def update_indexing_status(
         self,
@@ -805,6 +795,26 @@ class IndexingService:
         if not query_embedding:
             return []
 
+        return await self.vision_semantic_search_unified_by_embedding(
+            user_id=user_id,
+            query_embedding=query_embedding,
+            file_type=file_type,
+            limit=limit,
+            similarity_threshold=similarity_threshold,
+        )
+
+    async def vision_semantic_search_unified_by_embedding(
+        self,
+        user_id: UUID,
+        query_embedding: list[float],
+        file_type: Optional[str] = None,
+        limit: int = 20,
+        similarity_threshold: float = 0.0,
+    ) -> list[tuple[IndexedFile, float, Optional[dict]]]:
+        """
+        Vision search (files + video frames) using a pre-computed query embedding.
+        Returns list of (IndexedFile, similarity_score, matched_frame | None).
+        """
         file_results = await self.vision_semantic_search_by_embedding(
             user_id=user_id,
             query_embedding=query_embedding,
@@ -839,83 +849,302 @@ class IndexingService:
         merged.sort(key=lambda x: x[1], reverse=True)
         return merged[:limit]
 
-    async def vision_hybrid_search_unified(
+    # ==========================================================================
+    # Transcript Search Methods
+    # ==========================================================================
+
+    @staticmethod
+    def _transcript_match_info(
+        segment: VideoTranscriptSegment,
+        query: Optional[str] = None,
+    ) -> dict:
+        """
+        Build the matched-transcript payload returned with search results.
+
+        When the segment has WhisperX word-level timestamps and a query token
+        matches a word, startSeconds is refined to that word's timestamp so the
+        deep link lands on the exact spoken word.
+        """
+        info = {
+            "text": segment.text,
+            "startSeconds": segment.start_seconds,
+            "endSeconds": segment.end_seconds,
+            "segmentIndex": segment.segment_index,
+            "matchedWord": None,
+        }
+        if query and segment.words:
+            tokens = {
+                re.sub(r"[^\w']", "", t.lower())
+                for t in query.split()
+            } - {""}
+            for word in segment.words:
+                clean = re.sub(r"[^\w']", "", str(word.get("word", "")).lower())
+                if clean and clean in tokens and word.get("start") is not None:
+                    info["matchedWord"] = str(word["word"]).strip()
+                    info["startSeconds"] = float(word["start"])
+                    break
+        return info
+
+    async def transcript_lexical_search(
         self,
         user_id: UUID,
         query: str,
         file_type: Optional[str] = None,
         limit: int = 50,
-        text_weight: float = 0.5,
-        vision_weight: float = 0.5,
-    ) -> list[tuple[IndexedFile, float, float, float, Optional[dict]]]:
+    ) -> list[tuple[IndexedFile, VideoTranscriptSegment, float]]:
         """
-        Hybrid search (text + vision) with unified vision (files + video frames).
-        Returns (IndexedFile, text_score, vision_score, hybrid_score, matched_frame | None).
-        matched_frame = { "frameImageUrl", "timeSeconds", "frameIndex" } for video frame hits.
+        Full-text search over video transcript segments (Postgres FTS).
+
+        Returns at most one (best-ranked) segment per file:
+        list of (IndexedFile, VideoTranscriptSegment, ts_rank score), ordered by rank.
         """
         if not query or not query.strip():
             return []
-        fetch_limit = limit * 2
-        text_results, vision_results = await asyncio.gather(
-            self.search_files_with_scores(
+        if file_type == "image":
+            return []
+
+        tsvector = func.to_tsvector("english", VideoTranscriptSegment.text)
+        tsquery = func.websearch_to_tsquery("english", query)
+        rank = func.ts_rank(tsvector, tsquery).label("rank")
+
+        stmt = (
+            select(IndexedFile, VideoTranscriptSegment, rank)
+            .select_from(VideoTranscriptSegment)
+            .join(IndexedFile, IndexedFile.id == VideoTranscriptSegment.video_id)
+            .where(
+                and_(
+                    IndexedFile.user_id == user_id,
+                    tsvector.op("@@")(tsquery),
+                )
+            )
+            .order_by(desc("rank"), VideoTranscriptSegment.start_seconds)
+            .limit(limit * 4)
+        )
+
+        with trace_vector_search("transcript_lexical_search", metadata={"limit": limit}) as span:
+            result = await self.session.execute(stmt)
+            rows = result.all()
+            seen: set[UUID] = set()
+            results: list[tuple[IndexedFile, VideoTranscriptSegment, float]] = []
+            for file, segment, score in rows:
+                if file.id in seen:
+                    continue
+                seen.add(file.id)
+                results.append((file, segment, float(score)))
+                if len(results) >= limit:
+                    break
+            if span:
+                span.update(metadata={"result_count": len(results)})
+            return results
+
+    async def transcript_semantic_search_by_embedding(
+        self,
+        user_id: UUID,
+        query_embedding: list[float],
+        file_type: Optional[str] = None,
+        limit: int = 50,
+        similarity_threshold: float = 0.0,
+    ) -> list[tuple[IndexedFile, VideoTranscriptSegment, float]]:
+        """
+        Semantic search over transcript segment embeddings (pgvector cosine).
+
+        Returns at most one (most similar) segment per file:
+        list of (IndexedFile, VideoTranscriptSegment, similarity), ordered by similarity.
+        """
+        if file_type == "image":
+            return []
+
+        cosine_distance = VideoTranscriptSegment.text_embedding.cosine_distance(query_embedding)
+        similarity_score = (1 - cosine_distance).label("similarity")
+
+        stmt = (
+            select(IndexedFile, VideoTranscriptSegment, similarity_score)
+            .select_from(VideoTranscriptSegment)
+            .join(IndexedFile, IndexedFile.id == VideoTranscriptSegment.video_id)
+            .where(
+                and_(
+                    IndexedFile.user_id == user_id,
+                    VideoTranscriptSegment.text_embedding.isnot(None),
+                )
+            )
+            .order_by(cosine_distance)
+            .limit(limit * 4)
+        )
+
+        with trace_vector_search("transcript_semantic_search", metadata={"limit": limit}) as span:
+            result = await self.session.execute(stmt)
+            rows = result.all()
+            seen: set[UUID] = set()
+            results: list[tuple[IndexedFile, VideoTranscriptSegment, float]] = []
+            for file, segment, score in rows:
+                if score < similarity_threshold or file.id in seen:
+                    continue
+                seen.add(file.id)
+                results.append((file, segment, float(score)))
+                if len(results) >= limit:
+                    break
+            if span:
+                span.update(metadata={"result_count": len(results)})
+            return results
+
+    # ==========================================================================
+    # Hybrid Search (Reciprocal Rank Fusion)
+    # ==========================================================================
+
+    RRF_K = 60
+
+    async def hybrid_search_rrf(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 50,
+        rrf_k: int = RRF_K,
+    ) -> list[dict]:
+        """
+        Hybrid search fusing four retrieval legs with Reciprocal Rank Fusion:
+
+        1. Filename trigram similarity (lexical)
+        2. Vision embeddings over image thumbnails + video frames (semantic)
+        3. Transcript full-text search (lexical, with timestamps)
+        4. Transcript segment embeddings (semantic, with timestamps)
+
+        Each leg contributes 1 / (rrf_k + rank) per file; files ranked highly by
+        any leg (e.g. an exact transcript phrase match) surface near the top.
+
+        Returns dicts ordered by hybrid_score desc:
+        {
+            "file": IndexedFile,
+            "hybrid_score": float,        # total RRF score
+            "text_score": float,          # filename leg contribution
+            "vision_score": float,        # vision leg contribution
+            "transcript_score": float,    # transcript legs contribution
+            "matched_frame": dict | None,      # { frameImageUrl, timeSeconds, frameIndex }
+            "matched_transcript": dict | None, # { text, startSeconds, endSeconds, segmentIndex }
+        }
+        """
+        if not query or not query.strip():
+            return []
+        fetch_limit = max(limit * 2, 50)
+
+        filename_results = await self.search_files_with_scores(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
+        )
+
+        vision_service = get_vision_embedding_service()
+        query_embedding: Optional[list[float]] = None
+        if vision_service.is_configured:
+            query_embedding = await vision_service.generate_text_embedding(query)
+
+        vision_results: list[tuple[IndexedFile, float, Optional[dict]]] = []
+        transcript_semantic_results: list[tuple[IndexedFile, VideoTranscriptSegment, float]] = []
+        if query_embedding:
+            vision_results = await self.vision_semantic_search_unified_by_embedding(
                 user_id=user_id,
-                query=query,
-                file_type=file_type,
-                limit=fetch_limit,
-            ),
-            self.vision_semantic_search_unified(
-                user_id=user_id,
-                query=query,
+                query_embedding=query_embedding,
                 file_type=file_type,
                 limit=fetch_limit,
                 similarity_threshold=0.0,
-            ),
+            )
+            transcript_semantic_results = await self.transcript_semantic_search_by_embedding(
+                user_id=user_id,
+                query_embedding=query_embedding,
+                file_type=file_type,
+                limit=fetch_limit,
+            )
+
+        transcript_lexical_results = await self.transcript_lexical_search(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
         )
-        text_scores_by_id: dict[UUID, tuple[IndexedFile, float]] = {
-            f.id: (f, score) for f, score in text_results
-        }
-        vision_by_id: dict[UUID, tuple[IndexedFile, float, Optional[dict]]] = {
-            f.id: (f, score, mf) for f, score, mf in vision_results
-        }
-        all_file_ids = set(text_scores_by_id.keys()) | set(vision_by_id.keys())
-        if not all_file_ids:
-            return []
 
-        text_raw = [s for _, s in text_results] if text_results else [0.0]
-        vision_raw = [v[1] for v in vision_results] if vision_results else [0.0]
-        text_min = min(text_raw) if text_raw else 0.0
-        text_max = max(text_raw) if text_raw else 1.0
-        vision_min = min(vision_raw) if vision_raw else 0.0
-        vision_max = max(vision_raw) if vision_raw else 1.0
+        files_by_id: dict[UUID, IndexedFile] = {}
+        scores: dict[UUID, dict[str, float]] = {}
+        matched_frames: dict[UUID, dict] = {}
+        # file_id -> (best contribution seen, matched segment info)
+        matched_transcripts: dict[UUID, tuple[float, dict]] = {}
 
-        def norm_text(s: float) -> float:
-            if text_max == text_min:
-                return 1.0 if text_results else 0.0
-            return (s - text_min) / (text_max - text_min)
+        def leg_scores(file_id: UUID) -> dict[str, float]:
+            if file_id not in scores:
+                scores[file_id] = {"text": 0.0, "vision": 0.0, "transcript": 0.0}
+            return scores[file_id]
 
-        def norm_vision(s: float) -> float:
-            if vision_max == vision_min:
-                return 1.0 if vision_results else 0.0
-            return (s - vision_min) / (vision_max - vision_min)
+        for rank, (file, _score) in enumerate(filename_results):
+            files_by_id[file.id] = file
+            leg_scores(file.id)["text"] += 1.0 / (rrf_k + rank + 1)
 
-        combined: list[tuple[IndexedFile, float, float, float, Optional[dict]]] = []
-        for file_id in all_file_ids:
-            if file_id in text_scores_by_id:
-                file, text_score = text_scores_by_id[file_id]
-            else:
-                file, _, _ = vision_by_id[file_id]
-                text_score = 0.0
-            if file_id in vision_by_id:
-                _, vision_score, matched_frame = vision_by_id[file_id]
-            else:
-                vision_score = 0.0
-                matched_frame = None
-            norm_t = norm_text(text_score) if text_score > 0 else 0.0
-            norm_v = norm_vision(vision_score) if vision_score > 0 else 0.0
-            hybrid = (text_weight * norm_t) + (vision_weight * norm_v)
-            combined.append((file, norm_t, norm_v, hybrid, matched_frame))
-        combined.sort(key=lambda x: x[3], reverse=True)
+        for rank, (file, _score, matched_frame) in enumerate(vision_results):
+            files_by_id[file.id] = file
+            leg_scores(file.id)["vision"] += 1.0 / (rrf_k + rank + 1)
+            if matched_frame:
+                matched_frames[file.id] = matched_frame
+
+        for transcript_results in (transcript_lexical_results, transcript_semantic_results):
+            for rank, (file, segment, _score) in enumerate(transcript_results):
+                files_by_id[file.id] = file
+                contribution = 1.0 / (rrf_k + rank + 1)
+                leg_scores(file.id)["transcript"] += contribution
+                existing = matched_transcripts.get(file.id)
+                if existing is None or contribution > existing[0]:
+                    matched_transcripts[file.id] = (
+                        contribution,
+                        self._transcript_match_info(segment, query=query),
+                    )
+
+        combined = [
+            {
+                "file": files_by_id[file_id],
+                "hybrid_score": sum(legs.values()),
+                "text_score": legs["text"],
+                "vision_score": legs["vision"],
+                "transcript_score": legs["transcript"],
+                "matched_frame": matched_frames.get(file_id),
+                "matched_transcript": (
+                    matched_transcripts[file_id][1]
+                    if file_id in matched_transcripts
+                    else None
+                ),
+            }
+            for file_id, legs in scores.items()
+        ]
+        combined.sort(key=lambda x: x["hybrid_score"], reverse=True)
         return combined[:limit]
+
+    async def get_full_transcript(
+        self,
+        video_id: UUID,
+        user_id: UUID,
+    ) -> Optional[dict]:
+        """
+        Fetch a video's full transcript: all segments ordered by segment_index.
+
+        Returns {"file": IndexedFile, "segments": list[VideoTranscriptSegment]},
+        or None when the video doesn't exist or isn't owned by user_id.
+        """
+        file_row = (
+            await self.session.execute(
+                select(IndexedFile).where(
+                    IndexedFile.id == video_id,
+                    IndexedFile.user_id == user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not file_row:
+            return None
+
+        segments = (
+            await self.session.execute(
+                select(VideoTranscriptSegment)
+                .where(VideoTranscriptSegment.video_id == video_id)
+                .order_by(VideoTranscriptSegment.segment_index)
+            )
+        ).scalars().all()
+        return {"file": file_row, "segments": list(segments)}
 
     async def get_vision_indexing_stats(
         self,

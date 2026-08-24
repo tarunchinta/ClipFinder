@@ -13,7 +13,10 @@ from app.database import async_session_maker
 from app.models.indexed_file import IndexedFile
 from app.models.user import User
 from app.services.google_auth import get_valid_access_token
-from app.services.video_frame_indexing import run_frame_indexing_for_video
+from app.services.video_frame_indexing import (
+    index_image_thumbnail,
+    run_frame_indexing_for_video,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,18 +61,21 @@ async def _run_frame_indexing_async(
         if not user:
             return {"error": "User not found"}
 
-        access_token = await get_valid_access_token(
-            user_id=user.id,
-            access_token=user.google_access_token,
-            refresh_token=user.google_refresh_token,
-            expires_at=user.google_token_expires_at,
-            session=session,
-        )
-        if not access_token:
-            # #region agent log
-            _debug_log("tasks.py:_run_frame_indexing_async", "No access token", {"video_id": video_id}, "H5")
-            # #endregion
-            return {"error": "Could not get valid Google access token"}
+        # Instagram-sourced videos are downloaded from Azure Blob and need no Google token
+        access_token = None
+        if getattr(indexed_file, "source_type", "drive") == "drive":
+            access_token = await get_valid_access_token(
+                user_id=user.id,
+                access_token=user.google_access_token,
+                refresh_token=user.google_refresh_token,
+                expires_at=user.google_token_expires_at,
+                session=session,
+            )
+            if not access_token:
+                # #region agent log
+                _debug_log("tasks.py:_run_frame_indexing_async", "No access token", {"video_id": video_id}, "H5")
+                # #endregion
+                return {"error": "Could not get valid Google access token"}
 
         out = await run_frame_indexing_for_video(
             video_id=video_uuid,
@@ -82,6 +88,43 @@ async def _run_frame_indexing_async(
         _debug_log("tasks.py:_run_frame_indexing_async", "Task completed", {"video_id": video_id, "result_keys": list(out.keys()) if isinstance(out, dict) else None, "error": out.get("error") if isinstance(out, dict) else None, "frames_processed": out.get("frames_processed") if isinstance(out, dict) else None}, "H5")
         # #endregion
         return out
+
+
+async def _run_image_indexing_async(
+    file_id: str,
+    trace_id: str | None = None,
+    parent_span_id: str | None = None,
+) -> dict:
+    """Load image and user, get token, run thumbnail vision indexing."""
+    file_uuid = UUID(file_id)
+    async with async_session_maker() as session:
+        stmt = select(IndexedFile).where(IndexedFile.id == file_uuid)
+        indexed_file = (await session.execute(stmt)).scalar_one_or_none()
+        if not indexed_file or indexed_file.file_type != "image":
+            return {"error": "Image not found or not an image"}
+
+        user_stmt = select(User).where(User.id == indexed_file.user_id)
+        user = (await session.execute(user_stmt)).unique().scalar_one_or_none()
+        if not user:
+            return {"error": "User not found"}
+
+        access_token = await get_valid_access_token(
+            user_id=user.id,
+            access_token=user.google_access_token,
+            refresh_token=user.google_refresh_token,
+            expires_at=user.google_token_expires_at,
+            session=session,
+        )
+        if not access_token:
+            return {"error": "Could not get valid Google access token"}
+
+        return await index_image_thumbnail(
+            file_id=file_uuid,
+            google_access_token=access_token,
+            session=session,
+            trace_id=trace_id,
+            parent_span_id=parent_span_id,
+        )
 
 
 @celery_app.task(bind=True, name="app.tasks.index_video_frames")

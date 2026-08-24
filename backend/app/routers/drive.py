@@ -1,7 +1,6 @@
 """Google Drive API routes for folder and file operations."""
 
 import asyncio
-import json
 import logging
 from typing import Optional
 from uuid import UUID
@@ -15,20 +14,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.users import current_active_user
 from app.config import get_settings
 from app.database import get_async_session
+from app.models.indexed_file import IndexingStatus
 from app.models.user import User
 from app.observability import flush_langfuse, trace_batch_upload, trace_retrieval
 from app.services.google_auth import get_valid_access_token
 from app.services.google_drive import GoogleDriveService, MAX_CLIPS_PER_FOLDER
 from app.services.indexing import IndexingService
+from app.services.service_bus_publisher import (
+    publish_image_indexing_jobs,
+    publish_video_indexing_jobs,
+)
 from app.services.vision_embedding import normalize_drive_thumbnail_url
 
 logger = logging.getLogger(__name__)
 
 try:
-    from app.tasks import _run_frame_indexing_async
+    from app.tasks import _run_frame_indexing_async, _run_image_indexing_async
 except Exception as e:
-    logger.warning("Video frame indexing unavailable (tasks module failed to load): %s", e)
+    logger.warning("Indexing task runners unavailable (tasks module failed to load): %s", e)
     _run_frame_indexing_async = None
+    _run_image_indexing_async = None
 
 router = APIRouter(prefix="/api/drive", tags=["drive"])
 
@@ -364,15 +369,7 @@ async def index_folder_files(
             files=[],
         )
 
-    logger.info("[index] Getting access token for vision embeddings")
-    access_token = await get_valid_access_token(
-        user_id=user.id,
-        access_token=user.google_access_token,
-        refresh_token=user.google_refresh_token,
-        expires_at=user.google_token_expires_at,
-        session=session
-    )
-    logger.info("[index] Saving %d file(s) for indexing (vision embeddings)", len(valid_files))
+    logger.info("[index] Saving %d file(s) for indexing (metadata only)", len(valid_files))
 
     batch_metadata = {
         "folder_id": folder_id,
@@ -382,62 +379,46 @@ async def index_folder_files(
     }
     with trace_batch_upload("folder_index", metadata=batch_metadata):
         indexing_service = IndexingService(session)
-        indexed_files, video_trace_contexts = await indexing_service.save_files_for_indexing(
-            user_id=user.id,
-            google_account_id=google_account_id,
-            folder_id=folder_id,
-            files=valid_files,
-            google_access_token=access_token,
+        indexed_files, video_trace_contexts, image_trace_contexts = (
+            await indexing_service.save_files_for_indexing(
+                user_id=user.id,
+                google_account_id=google_account_id,
+                folder_id=folder_id,
+                files=valid_files,
+            )
         )
     logger.info("[index] save_files_for_indexing done: %d indexed_files", len(indexed_files))
 
-    videos = [f for f in indexed_files if f.file_type == "video"]
-    logger.info("[index] Videos to frame-index: %d (file_types in batch: %s)", len(videos), [f.file_type for f in indexed_files])
-    if videos:
-        settings = get_settings()
-        if settings.service_bus_connection_string:
-            logger.info(
-                "[index] Service Bus configured, sending %d message(s) to queue '%s'",
-                len(videos),
-                settings.video_indexing_queue_name,
-            )
-            try:
-                from azure.servicebus import ServiceBusClient, ServiceBusMessage
+    settings = get_settings()
+    if not settings.service_bus_connection_string:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service Bus not configured; indexing unavailable",
+        )
 
-                with ServiceBusClient.from_connection_string(
-                    conn_str=settings.service_bus_connection_string,
-                    logging_enable=False,
-                ) as sb_client:
-                    sender = sb_client.get_queue_sender(
-                        queue_name=settings.video_indexing_queue_name
-                    )
-                    with sender:
-                        for i, f in enumerate(videos):
-                            ctx = video_trace_contexts[i] if i < len(video_trace_contexts) else {}
-                            body = json.dumps({
-                                "video_id": str(f.id),
-                                "trace_id": ctx.get("trace_id"),
-                                "parent_span_id": ctx.get("parent_span_id"),
-                            })
-                            logger.info(
-                                "[index] Sending Service Bus message for video_id=%s filename=%s",
-                                f.id,
-                                f.filename,
-                            )
-                            sender.send_messages(ServiceBusMessage(body))
-                logger.info(
-                    "[index] Successfully sent %d Service Bus message(s) for video frame indexing",
-                    len(videos),
-                )
-            except Exception:
-                logger.exception(
-                    "[index] Failed to send messages to Service Bus, falling back to in-process video frame indexing"
-                )
-                _enqueue_in_process_video_indexing(videos, video_trace_contexts)
-        else:
-            logger.info(
-                "[index] Service Bus connection string not set; using in-process video frame indexing"
-            )
+    images = [
+        f for f in indexed_files
+        if f.file_type == "image" and f.vision_indexing_status == IndexingStatus.PENDING.value
+    ]
+    videos = [f for f in indexed_files if f.file_type == "video"]
+    logger.info(
+        "[index] Jobs to enqueue: %d image(s), %d video(s)",
+        len(images),
+        len(videos),
+    )
+
+    try:
+        if images:
+            publish_image_indexing_jobs(images, image_trace_contexts)
+        if videos:
+            publish_video_indexing_jobs(videos, video_trace_contexts)
+    except Exception:
+        logger.exception(
+            "[index] Service Bus publish failed, falling back to in-process indexing"
+        )
+        if images:
+            _enqueue_in_process_image_indexing(images, image_trace_contexts)
+        if videos:
             _enqueue_in_process_video_indexing(videos, video_trace_contexts)
 
     logger.info("[index] Returning response: indexedCount=%d", len(indexed_files))
@@ -540,6 +521,56 @@ async def search_files(
     )
 
 
+def _enqueue_in_process_image_indexing(
+    images: list,
+    image_trace_contexts: list[dict] | None = None,
+) -> None:
+    """
+    Fallback path: enqueue in-process image vision indexing via _run_image_indexing_async.
+    """
+    if _run_image_indexing_async is None:
+        logger.warning(
+            "[index] Image vision indexing skipped: task runner not available (%d image(s) not indexed)",
+            len(images),
+        )
+        return
+
+    logger.info(
+        "[index] Enqueueing image vision indexing for %d image(s) (in-process)",
+        len(images),
+    )
+
+    contexts = image_trace_contexts if image_trace_contexts is not None else []
+    if len(contexts) != len(images):
+        contexts = [{} for _ in images]
+
+    def _log_task_result(t: asyncio.Task) -> None:
+        try:
+            t.result()
+        except Exception:
+            logger.exception("[index] Image vision indexing task failed")
+
+    for f, ctx in zip(images, contexts):
+        logger.info(
+            "[index] Enqueueing image vision indexing: file_id=%s filename=%s",
+            f.id,
+            f.filename,
+        )
+        t = asyncio.create_task(
+            _run_image_indexing_async(
+                str(f.id),
+                trace_id=ctx.get("trace_id") if ctx else None,
+                parent_span_id=ctx.get("parent_span_id") if ctx else None,
+            )
+        )
+        t.add_done_callback(_log_task_result)
+
+    logger.info(
+        "[index] Image vision indexing enqueued for %d image(s), running in background",
+        len(images),
+    )
+
+
 def _enqueue_in_process_video_indexing(
     videos: list,
     video_trace_contexts: list[dict] | None = None,
@@ -636,8 +667,21 @@ class MatchedFrameInfo(BaseModel):
     frameIndex: int
 
 
+class MatchedTranscriptInfo(BaseModel):
+    """When a search hit matched transcript text, this describes the matched segment.
+
+    startSeconds is word-accurate when a query token matched a WhisperX-aligned
+    word (matchedWord is set); otherwise it is the segment start.
+    """
+    text: str
+    startSeconds: float
+    endSeconds: float
+    segmentIndex: int
+    matchedWord: Optional[str] = None
+
+
 class VisionHybridSearchFileInfo(BaseModel):
-    """File information for vision hybrid search results with all score components."""
+    """File information for hybrid search results with per-leg RRF score components."""
     id: UUID
     driveFileId: str
     filename: str
@@ -652,20 +696,20 @@ class VisionHybridSearchFileInfo(BaseModel):
     indexingStatus: str
     textScore: float
     visionScore: float
+    transcriptScore: float = 0.0
     hybridScore: float
     matchedFrame: Optional[MatchedFrameInfo] = None
+    matchedTranscript: Optional[MatchedTranscriptInfo] = None
 
     class Config:
         from_attributes = True
 
 
 class VisionHybridSearchResponse(BaseModel):
-    """Response for vision hybrid file search."""
+    """Response for hybrid file search (reciprocal rank fusion)."""
     files: list[VisionHybridSearchFileInfo]
     totalCount: int
     query: str
-    textWeight: float
-    visionWeight: float
 
 
 class VisionIndexingStatsResponse(BaseModel):
@@ -810,66 +854,50 @@ async def vision_hybrid_search_files(
     q: str = "",
     file_type: Optional[str] = None,
     limit: int = 50,
-    text_weight: float = 0.5,
-    vision_weight: float = 0.5,
     user: User = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session),
 ):
     """
-    Hybrid search combining text-based and vision semantic search with reranking.
-    
-    Combines results from substring/trigram text search and Gemini vision search
-    using weighted score fusion for better relevance ranking.
-    
-    Formula: hybrid_score = text_weight * normalized_text_score + vision_weight * normalized_vision_score
-    
+    Hybrid search fusing lexical and semantic legs with Reciprocal Rank Fusion (RRF).
+
+    Legs: filename trigram similarity, Gemini vision embeddings (thumbnails +
+    video frames), transcript full-text search, and transcript segment embeddings.
+    Each leg contributes 1/(k + rank) per file; a clip whose spoken words match
+    the query ranks high and carries the matched segment's timestamp.
+
     Args:
         q: Search query (required)
         file_type: Optional filter by file type ("video" or "image")
         limit: Maximum number of results to return (default 50, max 100)
-        text_weight: Weight for text search scores (default 0.5, range 0-1)
-        vision_weight: Weight for vision search scores (default 0.5, range 0-1)
-    
+
     Returns:
-        List of matching files with text, vision, and hybrid scores,
-        ordered by hybrid score from highest to lowest
+        List of matching files with per-leg and fused RRF scores, ordered by
+        hybrid score, including matched frame and/or transcript segment info.
     """
     if not q or not q.strip():
         return VisionHybridSearchResponse(
             files=[],
             totalCount=0,
             query=q,
-            textWeight=text_weight,
-            visionWeight=vision_weight,
         )
-    
-    # Validate weights
-    if text_weight < 0 or text_weight > 1:
-        text_weight = 0.5
-    if vision_weight < 0 or vision_weight > 1:
-        vision_weight = 0.5
-    
+
     # Cap limit at 100
     limit = min(limit, 100)
 
     with trace_retrieval(
-        "vision_hybrid_search",
+        "hybrid_search_rrf",
         metadata={
             "query": q[:100],
             "limit": limit,
-            "text_weight": text_weight,
-            "vision_weight": vision_weight,
             "file_type": file_type,
         },
     ) as span:
         indexing_service = IndexingService(session)
-        results = await indexing_service.vision_hybrid_search_unified(
+        results = await indexing_service.hybrid_search_rrf(
             user_id=user.id,
             query=q,
             file_type=file_type,
             limit=limit,
-            text_weight=text_weight,
-            vision_weight=vision_weight,
         )
         if span:
             span.update(
@@ -877,45 +905,51 @@ async def vision_hybrid_search_files(
                     "result_count": len(results),
                     "top_results": [
                         {
-                            "file_id": str(f.id),
-                            "filename": f.filename[:80],
-                            "text_score": round(text_score, 4),
-                            "vision_score": round(vision_score, 4),
-                            "hybrid_score": round(hybrid_score, 4),
-                            "matched_frame": mf is not None,
+                            "file_id": str(r["file"].id),
+                            "filename": r["file"].filename[:80],
+                            "text_score": round(r["text_score"], 4),
+                            "vision_score": round(r["vision_score"], 4),
+                            "transcript_score": round(r["transcript_score"], 4),
+                            "hybrid_score": round(r["hybrid_score"], 4),
+                            "matched_frame": r["matched_frame"] is not None,
+                            "matched_transcript": r["matched_transcript"] is not None,
                         }
-                        for f, text_score, vision_score, hybrid_score, mf in results[:5]
+                        for r in results[:5]
                     ],
                 }
             )
-    
-    # Convert to response format (include matchedFrame for video frame hits)
+
+    # Convert to response format (include matched frame/transcript for timestamp deep links)
     response_files = [
         VisionHybridSearchFileInfo(
-            id=f.id,
-            driveFileId=f.drive_file_id,
-            filename=f.filename,
-            mimeType=f.mime_type,
-            fileType=f.file_type,
-            sizeBytes=f.size_bytes,
-            durationSeconds=f.duration_seconds,
-            width=f.width,
-            height=f.height,
-            thumbnailUrl=f.thumbnail_url,
-            driveUrl=f.drive_url,
-            indexingStatus=f.indexing_status,
-            textScore=text_score,
-            visionScore=vision_score,
-            hybridScore=hybrid_score,
-            matchedFrame=MatchedFrameInfo(**mf) if mf else None,
+            id=r["file"].id,
+            driveFileId=r["file"].drive_file_id,
+            filename=r["file"].filename,
+            mimeType=r["file"].mime_type,
+            fileType=r["file"].file_type,
+            sizeBytes=r["file"].size_bytes,
+            durationSeconds=r["file"].duration_seconds,
+            width=r["file"].width,
+            height=r["file"].height,
+            thumbnailUrl=r["file"].thumbnail_url,
+            driveUrl=r["file"].drive_url,
+            indexingStatus=r["file"].indexing_status,
+            textScore=r["text_score"],
+            visionScore=r["vision_score"],
+            transcriptScore=r["transcript_score"],
+            hybridScore=r["hybrid_score"],
+            matchedFrame=MatchedFrameInfo(**r["matched_frame"]) if r["matched_frame"] else None,
+            matchedTranscript=(
+                MatchedTranscriptInfo(**r["matched_transcript"])
+                if r["matched_transcript"]
+                else None
+            ),
         )
-        for f, text_score, vision_score, hybrid_score, mf in results
+        for r in results
     ]
     flush_langfuse()
     return VisionHybridSearchResponse(
         files=response_files,
         totalCount=len(response_files),
         query=q,
-        textWeight=text_weight,
-        visionWeight=vision_weight,
     )

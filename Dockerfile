@@ -14,9 +14,11 @@ WORKDIR /app
 # Install system dependencies needed for:
 # - asyncpg: libpq-dev
 # - bcrypt/cryptography: build-essential
+# - in-process frame indexing fallback + yt-dlp stream merging: ffmpeg
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first (for better layer caching)

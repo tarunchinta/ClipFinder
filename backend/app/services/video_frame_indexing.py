@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import literal_column, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,7 @@ from app.observability import (
     trace_index_file,
     trace_video_frame,
 )
+from app.services.transcription import transcribe_video_with_own_session
 from app.services.vision_embedding import get_vision_embedding_service
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,48 @@ async def _download_video_from_drive(
     except Exception as e:
         logger.error(f"Drive download error: {e}")
         return None
+
+
+def _download_video_from_azure_blob_sync(blob_video_url: str) -> bytes | None:
+    """Download a stored source video from Azure Blob Storage by its blob URL."""
+    settings = get_settings()
+    if not settings.azure_blob_connection_string:
+        logger.error("Azure Blob not configured, cannot download source video")
+        return None
+    try:
+        parsed = urlparse(blob_video_url)
+        path_parts = parsed.path.strip("/").split("/", 1)
+        if len(path_parts) != 2:
+            logger.error("Unexpected blob video URL format: %s", blob_video_url[:120])
+            return None
+        container_name, blob_name = path_parts[0], path_parts[1]
+        from azure.storage.blob import BlobServiceClient
+
+        client = BlobServiceClient.from_connection_string(
+            settings.azure_blob_connection_string,
+        )
+        blob_client = client.get_container_client(container_name).get_blob_client(blob_name)
+        return blob_client.download_blob().readall()
+    except Exception as e:
+        logger.error("Azure Blob video download failed for %s: %s", blob_video_url[:120], e)
+        return None
+
+
+async def _download_video_bytes(
+    row: IndexedFile,
+    google_access_token: str | None,
+) -> bytes | None:
+    """Fetch the source video bytes for a row, dispatching on its ingestion source."""
+    if getattr(row, "source_type", "drive") == "instagram" and row.blob_video_url:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            functools.partial(_download_video_from_azure_blob_sync, row.blob_video_url),
+        )
+    if not google_access_token:
+        logger.error("No Google access token for Drive video %s", row.id)
+        return None
+    return await _download_video_from_drive(row.drive_file_id, google_access_token)
 
 
 def _get_video_fps(video_path: str) -> float:
@@ -323,6 +366,22 @@ async def _load_frame_image_bytes(
     return None
 
 
+async def _frame_embedding_exists(
+    session: AsyncSession,
+    video_id: UUID,
+    frame_index: int,
+) -> bool:
+    row = (
+        await session.execute(
+            select(VideoFrameEmbedding.id).where(
+                VideoFrameEmbedding.video_id == video_id,
+                VideoFrameEmbedding.frame_index == frame_index,
+            )
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
 async def _upsert_frame_embedding(
     session: AsyncSession,
     *,
@@ -331,7 +390,10 @@ async def _upsert_frame_embedding(
     time_seconds: float,
     embedding: list[float],
     frame_image_url: str | None,
-) -> None:
+) -> bool:
+    """
+    Upsert a frame embedding. Returns True if a new row was inserted (not an update).
+    """
     stmt = insert(VideoFrameEmbedding).values(
         id=uuid.uuid4(),
         video_id=video_id,
@@ -347,8 +409,9 @@ async def _upsert_frame_embedding(
             "embedding": stmt.excluded.embedding,
             "frame_image_url": stmt.excluded.frame_image_url,
         },
-    )
-    await session.execute(stmt)
+    ).returning(literal_column("(xmax = 0)").label("inserted"))
+    result = await session.execute(stmt)
+    return bool(result.scalar_one())
 
 
 async def _record_frame_result(
@@ -397,12 +460,13 @@ async def _maybe_mark_video_indexing_complete(
 
 async def extract_and_upload_frames(
     video_id: UUID,
-    google_access_token: str,
+    google_access_token: str | None,
     session: AsyncSession,
     work_dir: str,
 ) -> tuple[list[ExtractedFrame], IndexedFile | None, str | None]:
     """
-    Download video from Drive, extract frames with ffmpeg, upload JPEGs to storage.
+    Download video from its source (Drive or blob-stored Instagram reel), extract
+    frames with ffmpeg, upload JPEGs to storage.
 
     Sets indexing_status=processing and frames_total on the video row.
     Returns (frames, video_row, error_message).
@@ -423,10 +487,10 @@ async def extract_and_upload_frames(
     row.updated_at = datetime.utcnow()
     await session.commit()
 
-    video_bytes = await _download_video_from_drive(row.drive_file_id, google_access_token)
+    video_bytes = await _download_video_bytes(row, google_access_token)
     if not video_bytes:
         row.indexing_status = IndexingStatus.FAILED.value
-        row.error_message = "Failed to download video from Drive"
+        row.error_message = "Failed to download source video"
         row.updated_at = datetime.utcnow()
         await session.commit()
         return [], row, row.error_message
@@ -504,9 +568,13 @@ async def _finalize_frame_index_result(
     *,
     success: bool,
     update_completion: bool,
+    frame_index: int | None = None,
 ) -> None:
     if not update_completion:
         return
+    if not success and frame_index is not None:
+        if await _frame_embedding_exists(session, video_id, frame_index):
+            return
     await _record_frame_result(session, video_id, success=success)
     await _maybe_mark_video_indexing_complete(session, video_id)
     await session.commit()
@@ -551,7 +619,11 @@ async def index_single_frame(
             if not resolved_bytes:
                 await session.rollback()
                 await _finalize_frame_index_result(
-                    session, video_id, success=False, update_completion=update_completion
+                    session,
+                    video_id,
+                    success=False,
+                    update_completion=update_completion,
+                    frame_index=frame_index,
                 )
                 return False
 
@@ -560,11 +632,15 @@ async def index_single_frame(
             if not embedding:
                 await session.rollback()
                 await _finalize_frame_index_result(
-                    session, video_id, success=False, update_completion=update_completion
+                    session,
+                    video_id,
+                    success=False,
+                    update_completion=update_completion,
+                    frame_index=frame_index,
                 )
                 return False
 
-            await _upsert_frame_embedding(
+            inserted = await _upsert_frame_embedding(
                 session,
                 video_id=video_id,
                 frame_index=frame_index,
@@ -573,7 +649,7 @@ async def index_single_frame(
                 frame_image_url=frame_image_url,
             )
 
-            if update_completion:
+            if update_completion and inserted:
                 await _record_frame_result(session, video_id, success=True)
                 await _maybe_mark_video_indexing_complete(session, video_id)
 
@@ -595,7 +671,11 @@ async def index_single_frame(
             await session.rollback()
             try:
                 await _finalize_frame_index_result(
-                    session, video_id, success=False, update_completion=update_completion
+                    session,
+                    video_id,
+                    success=False,
+                    update_completion=update_completion,
+                    frame_index=frame_index,
                 )
             except Exception:
                 await session.rollback()
@@ -706,7 +786,7 @@ async def _index_frame_with_own_session(
 
 async def run_frame_indexing_for_video(
     video_id: UUID,
-    google_access_token: str,
+    google_access_token: str | None,
     session: AsyncSession,
     trace_id: str | None = None,
     parent_span_id: str | None = None,
@@ -714,9 +794,18 @@ async def run_frame_indexing_for_video(
     """
     For one video: extract frames, then CLIP+DB each frame in parallel (bounded).
 
-    Returns stats: { "frames_processed": int, "frames_failed": int, "error": str | None }.
+    Also transcribes the video's audio (Whisper) while frames are being embedded.
+
+    Returns stats: { "frames_processed": int, "frames_failed": int,
+    "transcript_segments": int, "transcript_error": str | None, "error": str | None }.
     """
-    result = {"frames_processed": 0, "frames_failed": 0, "error": None}
+    result = {
+        "frames_processed": 0,
+        "frames_failed": 0,
+        "transcript_segments": 0,
+        "transcript_error": None,
+        "error": None,
+    }
     logger.info("Video frame indexing starting for video_id=%s", video_id)
     _debug_log("video_frame_indexing.py:run_frame_indexing_for_video", "Entry", {"video_id": str(video_id)}, "H5")
 
@@ -752,6 +841,15 @@ async def run_frame_indexing_for_video(
             parallelism,
         )
 
+        # Transcribe audio concurrently with frame embedding (video file lives in tmpdir)
+        transcription_task = asyncio.create_task(
+            transcribe_video_with_own_session(
+                video_id,
+                os.path.join(tmpdir, "video"),
+                filename=row.filename,
+            )
+        )
+
         outcomes = await asyncio.gather(
             *[
                 _index_frame_with_own_session(
@@ -765,6 +863,14 @@ async def run_frame_indexing_for_video(
             ],
             return_exceptions=True,
         )
+
+        try:
+            transcript_result = await transcription_task
+            result["transcript_segments"] = transcript_result.get("segments", 0)
+            result["transcript_error"] = transcript_result.get("error")
+        except Exception as e:
+            logger.exception("Transcription task failed for video_id=%s: %s", video_id, e)
+            result["transcript_error"] = str(e)
 
         for outcome in outcomes:
             if isinstance(outcome, Exception):

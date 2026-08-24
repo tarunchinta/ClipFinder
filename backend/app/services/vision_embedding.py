@@ -303,6 +303,26 @@ class VisionEmbeddingService:
         """
         return await self.generate_embedding(text, mode="text")
 
+    async def generate_document_text_embedding(self, text: str) -> Optional[list[float]]:
+        """
+        Generate an embedding for document-side text (e.g. a transcript segment).
+
+        Unlike generate_text_embedding, no query prefix is applied: stored text is
+        embedded as-is so asymmetric query embeddings can retrieve it.
+        """
+        if not self.is_configured:
+            logger.warning("Gemini Embedding 2 not configured, skipping embedding generation")
+            return None
+        stripped = (text or "").strip()
+        if not stripped:
+            return None
+        input_summary = stripped[:200] + ("..." if len(stripped) > 200 else "")
+        return await self._call_gemini_embed(
+            parts=[{"text": stripped}],
+            trace_name="transcript_text_embedding",
+            input_summary=input_summary,
+        )
+
     async def generate_embeddings_batch(
         self,
         image_urls: list[str],

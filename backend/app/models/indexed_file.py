@@ -94,6 +94,26 @@ class IndexedFile(Base):
         nullable=True
     )
     
+    # Ingestion source ("drive" or "instagram"). Instagram rows use sentinel
+    # values for the non-nullable Drive columns: drive_file_id="instagram:<id>",
+    # folder_id=google_account_id="instagram".
+    source_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="drive",
+        server_default="drive"
+    )
+    # Original source URL (e.g. https://www.instagram.com/reel/...)
+    source_url: Mapped[Optional[str]] = mapped_column(
+        String(1000),
+        nullable=True
+    )
+    # Azure Blob URL of the stored source video (no SAS), for non-Drive sources
+    blob_video_url: Mapped[Optional[str]] = mapped_column(
+        String(1000),
+        nullable=True
+    )
+
     # Drive timestamps and URLs
     modified_time: Mapped[Optional[datetime]] = mapped_column(
         DateTime,
@@ -135,6 +155,13 @@ class IndexedFile(Base):
     vision_indexed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime,
         nullable=True
+    )
+
+    # Transcript indexing status (videos only; NULL for images)
+    transcript_status: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+        default=None,
     )
 
     # Video frame indexing progress (per-video completion tracking)

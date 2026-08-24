@@ -18,7 +18,7 @@ from alembic import context
 # Import your models and config
 from app.config import get_settings
 from app.database import Base
-from app.models import User, OAuthAccount, IndexedFile, VideoFrameEmbedding  # noqa: F401
+from app.models import User, OAuthAccount, IndexedFile, VideoFrameEmbedding, VideoTranscriptSegment  # noqa: F401
 
 # Alembic Config object
 config = context.config

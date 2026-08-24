@@ -24,11 +24,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 
-# Explicitly load .env file into environment variables BEFORE pydantic-settings
+# Load local development defaults without replacing environment variables
+# supplied by the deployment platform (for example, Azure Container Apps).
 
-# This ensures the subprocess also has the variables loaded
-
-load_dotenv(BASE_DIR / ".env", override=True)
+load_dotenv(BASE_DIR / ".env", override=False)
 
 
 
@@ -122,7 +121,10 @@ class Settings(BaseSettings):
 
     langfuse_public_key: str = ""
 
-    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_host: str = Field(
+        default="https://cloud.langfuse.com",
+        validation_alias=AliasChoices("LANGFUSE_HOST", "LANGFUSE_BASE_URL"),
+    )
 
     
 
@@ -168,11 +170,17 @@ class Settings(BaseSettings):
 
     azure_blob_connection_string: str = ""
 
-    azure_blob_container_name: str = "video-frames"
+    azure_blob_container_name: str = Field(
+        default="video-frames",
+        validation_alias=AliasChoices(
+            "AZURE_BLOB_CONTAINER_NAME",
+            "AZURE_BLOB_STORAGE_CONTAINER_NAME",
+        ),
+    )
 
 
 
-    # Azure Service Bus (for video frame indexing queue)
+    # Azure Service Bus (required for indexing job enqueue)
 
     service_bus_connection_string: str = Field(
 
@@ -190,6 +198,14 @@ class Settings(BaseSettings):
 
     )
 
+    image_indexing_queue_name: str = Field(
+
+        default="image-indexing",
+
+        validation_alias="IMAGE_INDEXING_QUEUE",
+
+    )
+
 
 
     # Max concurrent embed+DB tasks per video during in-process frame indexing
@@ -201,6 +217,122 @@ class Settings(BaseSettings):
         validation_alias="FRAME_INDEX_PARALLELISM",
 
     )
+
+
+
+    # Whisper transcription (WhisperX, word-level timestamps, runs locally on CPU during video indexing)
+
+    transcription_enabled: bool = Field(
+
+        default=True,
+
+        validation_alias="TRANSCRIPTION_ENABLED",
+
+    )
+
+    whisper_model_size: str = Field(
+
+        default="tiny",
+
+        validation_alias="WHISPER_MODEL_SIZE",
+
+    )
+
+
+
+    # Remote MCP server (streamable HTTP at /mcp)
+
+    mcp_user_email: str = Field(
+
+        default="",
+
+        validation_alias="MCP_USER_EMAIL",
+
+    )
+
+    azure_blob_videos_container_name: str = Field(
+
+        default="instagram-videos",
+
+        validation_alias="AZURE_BLOB_VIDEOS_CONTAINER",
+
+    )
+
+    mcp_max_reel_seconds: int = Field(
+
+        default=180,
+
+        validation_alias="MCP_MAX_REEL_SECONDS",
+
+    )
+
+    # OAuth client credentials for claude.ai custom connectors (Advanced settings).
+
+    mcp_oauth_client_id: str = Field(
+
+        default="",
+
+        validation_alias="MCP_OAUTH_CLIENT_ID",
+
+    )
+
+    mcp_oauth_client_secret: str = Field(
+
+        default="",
+
+        validation_alias="MCP_OAUTH_CLIENT_SECRET",
+
+    )
+
+    # WorkOS AuthKit (Google social login before MCP consent)
+
+    workos_api_key: str = Field(
+
+        default="",
+
+        validation_alias="WORKOS_API_KEY",
+
+    )
+
+    workos_client_id: str = Field(
+
+        default="",
+
+        validation_alias="WORKOS_CLIENT_ID",
+
+    )
+
+    workos_redirect_uri: str = Field(
+
+        default="",
+
+        validation_alias="WORKOS_REDIRECT_URI",
+
+    )
+
+    workos_cookie_password: str = Field(
+
+        default="",
+
+        validation_alias="WORKOS_COOKIE_PASSWORD",
+
+    )
+
+    @property
+
+    def workos_callback_uri(self) -> str:
+
+        if self.workos_redirect_uri:
+
+            return self.workos_redirect_uri
+
+        return f"{self.app_url.rstrip('/')}/mcp-oauth/workos/callback"
+
+    @property
+
+    def cookie_secure(self) -> bool:
+
+        return self.app_url.startswith("https://")
 
 
 

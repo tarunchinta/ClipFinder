@@ -414,6 +414,23 @@
             color: var(--accent-secondary);
         }
 
+        /* Matched transcript snippet ("spoken words" search hit) */
+        .transcript-snippet {
+            margin-top: 6px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            font-style: italic;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+
+        .transcript-snippet .transcript-time {
+            color: var(--accent-secondary);
+            font-style: normal;
+        }
+
         /* Video timeline: shows where in the video the matched timestamp is */
         .video-timeline {
             padding: 0 14px 8px;
@@ -700,6 +717,12 @@
             return m + ':' + (s < 10 ? '0' : '') + s;
         }
 
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         /**
          * Build Google Drive video URL with optional t= timestamp (seconds).
          * Drive supports view?t=90 or view?usp=sharing&t=90.
@@ -887,17 +910,28 @@
                 const frameTimeLabel = matchedFrame && matchedFrame.timeSeconds != null
                     ? '<span class="frame-time">Frame at ' + formatTimeSeconds(matchedFrame.timeSeconds) + '</span>'
                     : '';
-                
-                // Use Drive URL for clicking; add t= param when video has matched frame (deep link to timestamp)
+
+                // When search matched spoken words, show the transcript snippet with its timestamp
+                const matchedTranscript = file.matchedTranscript;
+                const transcriptSnippet = matchedTranscript && matchedTranscript.text
+                    ? `<div class="transcript-snippet"><span class="transcript-time">${formatTimeSeconds(matchedTranscript.startSeconds || 0)}</span> &ldquo;${escapeHtml(matchedTranscript.text)}&rdquo;</div>`
+                    : '';
+
+                // Deep-link timestamp: prefer the transcript match, fall back to the matched frame
+                const matchTimeSeconds = (matchedTranscript && matchedTranscript.startSeconds != null)
+                    ? matchedTranscript.startSeconds
+                    : (matchedFrame && matchedFrame.timeSeconds != null ? matchedFrame.timeSeconds : null);
+
+                // Use Drive URL for clicking; add t= param when video has a matched timestamp
                 const driveUrl = file.driveUrl || ('https://drive.google.com/file/d/' + file.driveFileId + '/view');
-                const cardHref = (isVideo && matchedFrame && matchedFrame.timeSeconds != null)
-                    ? driveUrlWithTimestamp(driveUrl, matchedFrame.timeSeconds)
+                const cardHref = (isVideo && matchTimeSeconds != null)
+                    ? driveUrlWithTimestamp(driveUrl, matchTimeSeconds)
                     : driveUrl;
 
-                // Timeline: position as % (when video has matched frame)
-                const showTimeline = isVideo && matchedFrame && matchedFrame.timeSeconds != null;
+                // Timeline: position as % (when video has a matched timestamp)
+                const showTimeline = isVideo && matchTimeSeconds != null;
                 const durationSeconds = file.durationSeconds;
-                const timeSeconds = matchedFrame ? matchedFrame.timeSeconds : 0;
+                const timeSeconds = matchTimeSeconds != null ? matchTimeSeconds : 0;
                 const positionPercent = showTimeline
                     ? (durationSeconds && durationSeconds > 0 ? Math.min(100, (timeSeconds / durationSeconds) * 100) : 50)
                     : 0;
@@ -924,11 +958,12 @@
                             <span>${sizeMB} MB</span>
                             ${durationDisplay}
                             ${frameTimeLabel}
-                            ${file.width && file.height 
+                            ${file.width && file.height
                                 ? `<span>${file.width}×${file.height}</span>`
                                 : ''
                             }
                         </div>
+                        ${transcriptSnippet}
                     </div>
                 </a>
             `}).join('');
