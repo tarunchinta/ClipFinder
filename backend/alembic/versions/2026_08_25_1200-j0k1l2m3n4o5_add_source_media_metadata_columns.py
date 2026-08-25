@@ -28,6 +28,10 @@ def upgrade() -> None:
     )
     op.add_column(
         "indexed_files",
+        sa.Column("channel", sa.String(255), nullable=True),
+    )
+    op.add_column(
+        "indexed_files",
         sa.Column("uploader", sa.String(255), nullable=True),
     )
     op.add_column(
@@ -44,5 +48,6 @@ def downgrade() -> None:
     op.drop_column("indexed_files", "published_at")
     op.drop_column("indexed_files", "uploader_id")
     op.drop_column("indexed_files", "uploader")
+    op.drop_column("indexed_files", "channel")
     op.drop_column("indexed_files", "description")
     op.drop_column("indexed_files", "title")

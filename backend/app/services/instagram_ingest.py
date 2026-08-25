@@ -62,8 +62,8 @@ def _timestamp_to_datetime(timestamp: int | float | None) -> datetime | None:
 def _download_reel_sync(url: str, out_dir: str) -> dict:
     """
     Download a reel with yt-dlp. Returns the video id, the metadata Instagram
-    reports about the post (title, description, uploader, uploader_id,
-    published_at, duration) and the downloaded file path.
+    reports about the post (title, description, channel, uploader,
+    uploader_id, published_at, duration) and the downloaded file path.
     """
     from yt_dlp import YoutubeDL
     from yt_dlp.utils import DownloadError
@@ -87,6 +87,7 @@ def _download_reel_sync(url: str, out_dir: str) -> dict:
         "id": info.get("id"),
         "title": info.get("title"),
         "description": info.get("description"),
+        "channel": info.get("channel"),
         "uploader": info.get("uploader"),
         "uploader_id": info.get("uploader_id"),
         "published_at": _timestamp_to_datetime(info.get("timestamp")),
@@ -168,6 +169,7 @@ async def ingest_instagram_reel(
         filename = f"{(info.get('title') or info['id'])[:490]}.mp4"
         size_bytes = os.path.getsize(info["file_path"])
         title = _truncate(info.get("title"), 500)
+        channel = _truncate(info.get("channel"), 255)
         uploader = _truncate(info.get("uploader"), 255)
         uploader_id = _truncate(info.get("uploader_id"), 255)
         now = datetime.utcnow()
@@ -185,6 +187,7 @@ async def ingest_instagram_reel(
             source_url=url,
             title=title,
             description=info.get("description"),
+            channel=channel,
             uploader=uploader,
             uploader_id=uploader_id,
             published_at=info.get("published_at"),
@@ -202,6 +205,7 @@ async def ingest_instagram_reel(
                 "source_url": stmt.excluded.source_url,
                 "title": stmt.excluded.title,
                 "description": stmt.excluded.description,
+                "channel": stmt.excluded.channel,
                 "uploader": stmt.excluded.uploader,
                 "uploader_id": stmt.excluded.uploader_id,
                 "published_at": stmt.excluded.published_at,
@@ -253,6 +257,7 @@ async def ingest_instagram_reel(
         "id": info["id"],
         "title": indexed_file.title,
         "description": indexed_file.description,
+        "channel": indexed_file.channel,
         "uploader": indexed_file.uploader,
         "uploader_id": indexed_file.uploader_id,
         "published_at": (

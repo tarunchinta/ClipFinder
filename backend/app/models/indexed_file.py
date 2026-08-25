@@ -125,6 +125,12 @@ class IndexedFile(Base):
         Text,
         nullable=True
     )
+    # Handle of the account that posted the media (e.g. Instagram @username);
+    # the linkable identity, unlike uploader/uploader_id
+    channel: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True
+    )
     # Display name of the account that posted the media
     uploader: Mapped[Optional[str]] = mapped_column(
         String(255),
