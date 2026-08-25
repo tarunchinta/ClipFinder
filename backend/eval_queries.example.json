@@ -1,0 +1,30 @@
+{
+  "description": "Example query set — copy to eval_queries.json and replace with real drive_file_ids from your dev account.",
+  "default_k": 10,
+  "queries": [
+    {
+      "query": "sourdough starter explainer",
+      "file_type": "video",
+      "notes": "Graded: the full walkthrough is the ideal answer, the short clip is acceptable.",
+      "relevant": [
+        {"drive_file_id": "instagram:REPLACE_WITH_REAL_SHORTCODE", "gain": 3},
+        {"drive_file_id": "instagram:REPLACE_WITH_ANOTHER", "gain": 1}
+      ]
+    },
+    {
+      "query": "someone says the phrase let it rest overnight",
+      "notes": "Exercises the transcript legs specifically — no filename or visual signal.",
+      "relevant": [
+        {"drive_file_id": "instagram:REPLACE_WITH_REAL_SHORTCODE"}
+      ]
+    },
+    {
+      "query": "dog running on a beach",
+      "file_type": null,
+      "notes": "Exercises the vision leg — visual content with no spoken words to match.",
+      "relevant": [
+        {"drive_file_id": "REPLACE_WITH_DRIVE_FILE_ID"}
+      ]
+    }
+  ]
+}
