@@ -114,6 +114,33 @@ class IndexedFile(Base):
         nullable=True
     )
 
+    # Metadata reported by the source platform (populated for Instagram reels;
+    # NULL for Drive files, which carry no equivalent fields).
+    title: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True
+    )
+    # Post caption / full description text
+    description: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True
+    )
+    # Display name of the account that posted the media
+    uploader: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True
+    )
+    # Stable platform-side account id (survives handle renames)
+    uploader_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True
+    )
+    # When the media was published on the source platform (UTC)
+    published_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True
+    )
+
     # Drive timestamps and URLs
     modified_time: Mapped[Optional[datetime]] = mapped_column(
         DateTime,

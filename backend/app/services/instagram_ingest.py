@@ -43,8 +43,28 @@ def _validate_reel_url(url: str) -> None:
         )
 
 
+def _truncate(value: str | None, limit: int) -> str | None:
+    """Clamp a metadata string to its column width; empty values become NULL."""
+    return value[:limit] if value else None
+
+
+def _timestamp_to_datetime(timestamp: int | float | None) -> datetime | None:
+    """Convert a yt-dlp unix timestamp to a naive UTC datetime, matching the model."""
+    if timestamp is None:
+        return None
+    try:
+        return datetime.utcfromtimestamp(timestamp)
+    except (OverflowError, OSError, ValueError):
+        logger.warning("Reel reported an unusable timestamp: %r", timestamp)
+        return None
+
+
 def _download_reel_sync(url: str, out_dir: str) -> dict:
-    """Download a reel with yt-dlp. Returns {id, title, duration, file_path}."""
+    """
+    Download a reel with yt-dlp. Returns the video id, the metadata Instagram
+    reports about the post (title, description, uploader, uploader_id,
+    published_at, duration) and the downloaded file path.
+    """
     from yt_dlp import YoutubeDL
     from yt_dlp.utils import DownloadError
 
@@ -66,6 +86,10 @@ def _download_reel_sync(url: str, out_dir: str) -> dict:
     return {
         "id": info.get("id"),
         "title": info.get("title"),
+        "description": info.get("description"),
+        "uploader": info.get("uploader"),
+        "uploader_id": info.get("uploader_id"),
+        "published_at": _timestamp_to_datetime(info.get("timestamp")),
         "duration": info.get("duration"),
         "file_path": file_path,
     }
@@ -143,6 +167,9 @@ async def ingest_instagram_reel(
 
         filename = f"{(info.get('title') or info['id'])[:490]}.mp4"
         size_bytes = os.path.getsize(info["file_path"])
+        title = _truncate(info.get("title"), 500)
+        uploader = _truncate(info.get("uploader"), 255)
+        uploader_id = _truncate(info.get("uploader_id"), 255)
         now = datetime.utcnow()
         stmt = insert(IndexedFile).values(
             user_id=user.id,
@@ -156,6 +183,11 @@ async def ingest_instagram_reel(
             duration_seconds=duration,
             source_type="instagram",
             source_url=url,
+            title=title,
+            description=info.get("description"),
+            uploader=uploader,
+            uploader_id=uploader_id,
+            published_at=info.get("published_at"),
             indexing_status=IndexingStatus.PENDING.value,
             transcript_status=IndexingStatus.PENDING.value,
             created_at=now,
@@ -168,6 +200,11 @@ async def ingest_instagram_reel(
                 "size_bytes": stmt.excluded.size_bytes,
                 "duration_seconds": stmt.excluded.duration_seconds,
                 "source_url": stmt.excluded.source_url,
+                "title": stmt.excluded.title,
+                "description": stmt.excluded.description,
+                "uploader": stmt.excluded.uploader,
+                "uploader_id": stmt.excluded.uploader_id,
+                "published_at": stmt.excluded.published_at,
                 "indexing_status": IndexingStatus.PENDING.value,
                 "transcript_status": IndexingStatus.PENDING.value,
                 "error_message": None,
@@ -214,7 +251,15 @@ async def ingest_instagram_reel(
     return {
         "video_id": str(indexed_file.id),
         "id": info["id"],
-        "title": info.get("title"),
+        "title": indexed_file.title,
+        "description": indexed_file.description,
+        "uploader": indexed_file.uploader,
+        "uploader_id": indexed_file.uploader_id,
+        "published_at": (
+            indexed_file.published_at.isoformat()
+            if indexed_file.published_at
+            else None
+        ),
         "duration_seconds": duration,
         "source_url": url,
         "file_path": blob_path,
