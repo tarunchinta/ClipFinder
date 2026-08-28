@@ -71,7 +71,6 @@ service-account*.json
 *.onnx
 *.npy
 *.npz
-models/
 .cache/
 .huggingface/
 
