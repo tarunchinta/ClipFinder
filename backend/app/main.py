@@ -15,7 +15,7 @@ from app.config import get_settings
 from app.database import create_db_and_tables
 from app.mcp_server.auth import StaticBearerAuthMiddleware
 from app.mcp_server.oauth import router as mcp_oauth_router
-from app.mcp_server.server import mcp
+from app.mcp_server.server import mcp, mcp_http_app
 from app.routers import auth_router, pages_router, drive_router, reels_router
 
 # Configure logging so app and router logs are visible
@@ -115,7 +115,7 @@ app.include_router(reels_router)
 app.include_router(mcp_oauth_router)
 
 # Remote MCP server (streamable HTTP), guarded by bearer auth (static key or OAuth)
-app.mount("/mcp", StaticBearerAuthMiddleware(mcp.streamable_http_app()))
+app.mount("/mcp", StaticBearerAuthMiddleware(mcp_http_app))
 
 
 # Health check endpoint

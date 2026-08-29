@@ -1,6 +1,7 @@
 # FastAPI & Server
 fastapi==0.109.0
-uvicorn[standard]==0.27.0
+# mcp 2.x requires uvicorn>=0.31.1
+uvicorn[standard]>=0.31.1
 # fastapi-users 15.0.2 requires python-multipart==0.0.21
 python-multipart==0.0.21
 
@@ -54,8 +55,8 @@ httpx>=0.28,<0.29
 azure-storage-blob>=12.19.0
 azure-servicebus>=7.13.0
 
-# Remote MCP server (streamable HTTP transport)
-mcp>=1.9.0
+# Remote MCP server (streamable HTTP transport). 2.x required for MCP Apps UI.
+mcp>=2.0.0
 
 # Instagram reel download (keep recent; Instagram extractor churns)
 yt-dlp>=2025.1.26

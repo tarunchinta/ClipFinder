@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClipFinder Search</title>
+  <style>
+    :root {
+      --bg-primary: #0a0a0b;
+      --bg-secondary: #111113;
+      --bg-card: #18181b;
+      --accent: #f97316;
+      --accent-glow: rgba(249, 115, 22, 0.35);
+      --text-primary: #fafafa;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+      --border: #27272a;
+      --success: #22c55e;
+      --warning: #eab308;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .wrap { display: flex; flex-direction: column; max-height: 480px; }
+    form.search {
+      display: flex;
+      gap: 8px;
+      padding: 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-secondary);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    form.search input {
+      flex: 1;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-card);
+      color: var(--text-primary);
+      outline: none;
+      font: inherit;
+    }
+    form.search input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+    form.search button {
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    form.search button:disabled { opacity: 0.55; cursor: default; }
+    .status {
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+    .results {
+      overflow-y: auto;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 400px;
+    }
+    .empty, .error {
+      padding: 28px 16px;
+      text-align: center;
+      color: var(--text-muted);
+    }
+    .error { color: #fca5a5; }
+    .card {
+      display: grid;
+      grid-template-columns: 112px 1fr;
+      gap: 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .thumb {
+      width: 112px;
+      height: 84px;
+      background: var(--bg-secondary);
+      position: relative;
+    }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .thumb .ph {
+      width: 100%;
+      height: 100%;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .info { padding: 8px 10px 8px 0; min-width: 0; }
+    .name {
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 4px;
+      color: var(--text-secondary);
+      font-size: 11px;
+    }
+    .badge {
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: rgba(249, 115, 22, 0.15);
+      color: var(--accent);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .badge.pending { background: rgba(234, 179, 8, 0.15); color: var(--warning); }
+    .badge.ok { background: rgba(34, 197, 94, 0.12); color: var(--success); }
+    .snippet {
+      margin-top: 6px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .links a, .links button.link {
+      background: none;
+      border: none;
+      padding: 0;
+      color: var(--accent);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <form class="search" id="searchForm">
+      <input id="queryInput" type="search" placeholder="Search clips…" autocomplete="off">
+      <button type="submit" id="searchBtn">Search</button>
+    </form>
+    <div class="status" id="status">Connecting…</div>
+    <div class="results" id="results"></div>
+  </div>
+  <script type="module">
+    import { App } from "https://cdn.jsdelivr.net/npm/@modelcontextprotocol/ext-apps/+esm";
+
+    const app = new App({ name: "ClipFinder Search", version: "1.0.0" }, {});
+    const form = document.getElementById("searchForm");
+    const input = document.getElementById("queryInput");
+    const button = document.getElementById("searchBtn");
+    const statusEl = document.getElementById("status");
+    const resultsEl = document.getElementById("results");
+
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.textContent = text == null ? "" : String(text);
+      return div.innerHTML;
+    }
+
+    function formatTime(seconds) {
+      if (seconds == null || Number.isNaN(Number(seconds))) return "";
+      const t = Math.max(0, Math.floor(Number(seconds)));
+      const m = Math.floor(t / 60);
+      const s = t % 60;
+      return m + ":" + String(s).padStart(2, "0");
+    }
+
+    function driveUrlWithTimestamp(baseUrl, timeSeconds) {
+      if (!baseUrl || timeSeconds == null || timeSeconds < 0) return baseUrl || "";
+      const sep = baseUrl.includes("?") ? "&" : "?";
+      return baseUrl + sep + "t=" + Math.floor(timeSeconds);
+    }
+
+    function parseSearchPayload(payload) {
+      if (!payload) return { query: "", results: [] };
+      const result = payload.result ?? payload;
+      const candidates = [
+        result.structuredContent,
+        result.structured_content,
+      ];
+      if (Array.isArray(result.content)) {
+        for (const block of result.content) {
+          if (block && block.type === "text" && block.text) {
+            try { candidates.push(JSON.parse(block.text)); } catch {}
+          }
+        }
+      }
+      candidates.push(result, payload);
+      for (const candidate of candidates) {
+        if (candidate && Array.isArray(candidate.results)) {
+          return {
+            query: candidate.query || "",
+            results: candidate.results,
+          };
+        }
+      }
+      return { query: "", results: [] };
+    }
+
+    async function openUrl(url) {
+      if (!url) return;
+      try {
+        if (typeof app.openLink === "function") {
+          await app.openLink({ url });
+          return;
+        }
+      } catch {}
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+
+    function setLoading(on, message) {
+      button.disabled = on;
+      statusEl.textContent = message || (on ? "Searching…" : "");
+    }
+
+    function renderResults(data) {
+      const query = data.query || "";
+      const results = Array.isArray(data.results) ? data.results : [];
+      if (query && input.value !== query) input.value = query;
+
+      if (!results.length) {
+        resultsEl.innerHTML = `<div class="empty">No clips found${query ? ` for “${escapeHtml(query)}”` : ""}.</div>`;
+        statusEl.textContent = query ? `0 results for “${query}”` : "No results";
+        return;
+      }
+
+      statusEl.textContent = `${results.length} result${results.length === 1 ? "" : "s"}${query ? ` for “${query}”` : ""}`;
+      resultsEl.innerHTML = results.map((item) => {
+        const frame = item.matched_frame || {};
+        const thumbMeta = item.matched_thumbnail || {};
+        const img =
+          frame.frame_image_url ||
+          thumbMeta.thumbnail_image_url ||
+          item.thumbnail_url ||
+          "";
+        const transcript = item.matched_transcript || {};
+        const caption = item.matched_caption || {};
+        const matchTime =
+          transcript.start_seconds != null ? transcript.start_seconds :
+          frame.time_seconds != null ? frame.time_seconds : null;
+        const driveHref = driveUrlWithTimestamp(item.drive_url, matchTime);
+        const playHref = item.video_url || driveHref || item.instagram_url || "";
+        const score = item.hybrid_score != null ? Number(item.hybrid_score).toFixed(3) : "";
+        const status = item.indexing_status || "";
+        const pending = status === "pending" || status === "processing";
+        const snippet = transcript.text || caption.text || "";
+        const snippetTime = transcript.start_seconds != null
+          ? formatTime(transcript.start_seconds)
+          : (frame.time_seconds != null ? formatTime(frame.time_seconds) : "");
+        const duration = item.duration_seconds != null
+          ? formatTime(item.duration_seconds)
+          : "";
+
+        const links = [];
+        if (playHref) links.push(`<button class="link" data-url="${escapeHtml(playHref)}" type="button">Play</button>`);
+        if (item.instagram_url) links.push(`<button class="link" data-url="${escapeHtml(item.instagram_url)}" type="button">Instagram</button>`);
+        if (driveHref) links.push(`<button class="link" data-url="${escapeHtml(driveHref)}" type="button">Drive</button>`);
+
+        return `
+          <article class="card">
+            <div class="thumb">
+              ${img
+                ? `<img src="${escapeHtml(img)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                   <div class="ph">No preview</div>`
+                : `<div class="ph" style="display:flex">No preview</div>`}
+            </div>
+            <div class="info">
+              <div class="name" title="${escapeHtml(item.filename || "")}">${escapeHtml(item.filename || "Untitled clip")}</div>
+              <div class="meta">
+                <span class="badge">${escapeHtml(item.file_type || "video")}</span>
+                ${pending ? `<span class="badge pending">${escapeHtml(status)}</span>` : `<span class="badge ok">${escapeHtml(status || "indexed")}</span>`}
+                ${score ? `<span>score ${escapeHtml(score)}</span>` : ""}
+                ${duration ? `<span>${escapeHtml(duration)}</span>` : ""}
+                ${snippetTime ? `<span>@ ${escapeHtml(snippetTime)}</span>` : ""}
+              </div>
+              ${snippet ? `<div class="snippet">${snippetTime ? escapeHtml(snippetTime) + " · " : ""}“${escapeHtml(snippet)}”</div>` : ""}
+              <div class="links">${links.join("")}</div>
+            </div>
+          </article>`;
+      }).join("");
+    }
+
+    resultsEl.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-url]");
+      if (!btn) return;
+      event.preventDefault();
+      openUrl(btn.getAttribute("data-url"));
+    });
+
+    async function runSearch(query) {
+      const q = (query || "").trim();
+      if (!q) return;
+      setLoading(true, "Searching…");
+      try {
+        const result = await app.callServerTool({
+          name: "search_clips",
+          arguments: { query: q, limit: 10 },
+        });
+        if (result && result.isError) {
+          const text = (result.content || []).map((b) => b.text).filter(Boolean).join(" ");
+          resultsEl.innerHTML = `<div class="error">${escapeHtml(text || "Search failed")}</div>`;
+          statusEl.textContent = "Search failed";
+          return;
+        }
+        renderResults(parseSearchPayload(result));
+      } catch (err) {
+        resultsEl.innerHTML = `<div class="error">${escapeHtml(err.message || "Search failed")}</div>`;
+        statusEl.textContent = "Search failed";
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      runSearch(input.value);
+    });
+
+    app.ontoolresult = (payload) => {
+      renderResults(parseSearchPayload(payload));
+    };
+
+    try {
+      await app.connect();
+      setLoading(false, "Search indexed clips");
+    } catch (err) {
+      statusEl.textContent = "Could not connect to host";
+      resultsEl.innerHTML = `<div class="error">${escapeHtml(err.message || "Host connection failed")}</div>`;
+    }
+  </script>
+</body>
+</html>
