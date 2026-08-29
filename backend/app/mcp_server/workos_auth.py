@@ -13,11 +13,7 @@ from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from workos import WorkOSClient
-from workos.session import (
-    AuthenticateWithSessionCookieFailureReason,
-    seal_session_from_auth_response,
-    Session,
-)
+from workos.session import AuthenticateWithSessionCookieFailureReason, Session
 
 from app.config import get_settings
 from app.models.user import User
@@ -66,6 +62,29 @@ def _workos_user_to_dict(workos_user: Any) -> dict[str, Any]:
     }
 
 
+def _seal_session_from_auth_response(
+    *,
+    access_token: str,
+    refresh_token: str,
+    user: dict[str, Any],
+    impersonator: dict[str, Any] | None = None,
+    cookie_password: str,
+) -> str:
+    """Seal auth tokens into a cookie.
+
+    WorkOS 6+ ships ``seal_session_from_auth_response``; 5.x exposes the
+    same Fernet helper as ``Session.seal_data``.
+    """
+    payload: dict[str, Any] = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "user": user,
+    }
+    if impersonator is not None:
+        payload["impersonator"] = impersonator
+    return Session.seal_data(payload, cookie_password)
+
+
 def seal_auth_response(auth_response: Any) -> str:
     """Seal a WorkOS authenticate_with_code response into a cookie value."""
     user = _workos_user_to_dict(auth_response.user)
@@ -73,7 +92,7 @@ def seal_auth_response(auth_response: Any) -> str:
     if getattr(auth_response, "impersonator", None) is not None:
         imp = auth_response.impersonator
         impersonator = imp.to_dict() if hasattr(imp, "to_dict") else imp
-    return seal_session_from_auth_response(
+    return _seal_session_from_auth_response(
         access_token=auth_response.access_token,
         refresh_token=auth_response.refresh_token,
         user=user,

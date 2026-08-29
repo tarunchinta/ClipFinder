@@ -211,6 +211,49 @@ def _extract_frames_ffmpeg(video_path: str, out_dir: str, every_n: int = FRAME_I
     return results
 
 
+def _extract_poster_ffmpeg(video_path: str, out_path: str) -> bool:
+    """Extract a single poster JPEG at t=0, downsampled like frame extracts."""
+    vf = (
+        f"scale={FRAME_MAX_DIMENSION}:{FRAME_MAX_DIMENSION}"
+        ":force_original_aspect_ratio=decrease"
+    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-ss", "0", "-i", video_path,
+                "-vframes", "1",
+                "-vf", vf,
+                "-q:v", str(FRAME_JPEG_QUALITY),
+                out_path,
+            ],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.error("ffmpeg poster extract failed: %s", e)
+        return False
+
+
+def thumbnail_blob_path(user_id: UUID, file_id: UUID) -> str:
+    """Azure Blob path for a file's poster JPEG in the frames container."""
+    return f"{user_id}/{file_id}/thumbnail.jpg"
+
+
+def upload_thumbnail_jpeg_sync(user_id: UUID, file_id: UUID, image_bytes: bytes) -> str | None:
+    """Upload poster JPEG bytes to Azure Blob; return blob URL or None."""
+    settings = get_settings()
+    if not settings.azure_blob_connection_string:
+        logger.warning("Azure Blob not configured, cannot store thumbnail")
+        return None
+    return _upload_frame_to_azure_blob(
+        settings.azure_blob_container_name,
+        thumbnail_blob_path(user_id, file_id),
+        image_bytes,
+    )
+
+
 def _upload_frame_to_azure_blob(
     container_name: str,
     blob_path: str,
@@ -500,9 +543,16 @@ async def extract_and_upload_frames(
         f.write(video_bytes)
 
     loop = asyncio.get_running_loop()
-    raw_frames = await loop.run_in_executor(
-        None,
-        functools.partial(_extract_frames_ffmpeg, video_path, work_dir, FRAME_INTERVAL),
+    poster_path = os.path.join(work_dir, "thumbnail.jpg")
+    raw_frames, poster_ok = await asyncio.gather(
+        loop.run_in_executor(
+            None,
+            functools.partial(_extract_frames_ffmpeg, video_path, work_dir, FRAME_INTERVAL),
+        ),
+        loop.run_in_executor(
+            None,
+            functools.partial(_extract_poster_ffmpeg, video_path, poster_path),
+        ),
     )
     if not raw_frames:
         row.indexing_status = IndexingStatus.FAILED.value
@@ -549,6 +599,23 @@ async def extract_and_upload_frames(
                 local_jpeg_path=jpeg_path,
             )
         )
+
+    if poster_ok:
+        with open(poster_path, "rb") as f:
+            poster_bytes = f.read()
+        poster_url: str | None = None
+        if settings.azure_blob_connection_string:
+            poster_url = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _upload_frame_to_azure_blob,
+                    settings.azure_blob_container_name,
+                    thumbnail_blob_path(row.user_id, video_id),
+                    poster_bytes,
+                ),
+            )
+        if poster_url:
+            row.blob_thumbnail_url = poster_url
 
     row.frames_total = len(extracted)
     row.updated_at = datetime.utcnow()
@@ -761,6 +828,38 @@ async def index_image_thumbnail(
         return result
 
 
+async def _embed_thumbnail_with_own_session(
+    video_id: UUID,
+    local_jpeg_path: str,
+) -> bool:
+    """Generate thumbnail_embedding from a local poster JPEG in a dedicated session."""
+    if not os.path.isfile(local_jpeg_path):
+        return False
+    vision = get_vision_embedding_service()
+    if not vision.is_configured:
+        return False
+    try:
+        with open(local_jpeg_path, "rb") as f:
+            image_bytes = f.read()
+    except OSError as e:
+        logger.error("Failed to read poster %s: %s", local_jpeg_path, e)
+        return False
+    embedding = await vision.generate_embedding_from_image_bytes(image_bytes)
+    if not embedding:
+        logger.warning("Thumbnail embedding failed for video_id=%s", video_id)
+        return False
+    async with async_session_maker() as session:
+        row = (
+            await session.execute(select(IndexedFile).where(IndexedFile.id == video_id))
+        ).scalar_one_or_none()
+        if not row:
+            return False
+        row.thumbnail_embedding = embedding
+        row.updated_at = datetime.utcnow()
+        await session.commit()
+    return True
+
+
 async def _index_frame_with_own_session(
     video_id: UUID,
     frame: ExtractedFrame,
@@ -849,6 +948,12 @@ async def run_frame_indexing_for_video(
                 filename=row.filename,
             )
         )
+        thumbnail_task = asyncio.create_task(
+            _embed_thumbnail_with_own_session(
+                video_id,
+                os.path.join(tmpdir, "thumbnail.jpg"),
+            )
+        )
 
         outcomes = await asyncio.gather(
             *[
@@ -871,6 +976,11 @@ async def run_frame_indexing_for_video(
         except Exception as e:
             logger.exception("Transcription task failed for video_id=%s: %s", video_id, e)
             result["transcript_error"] = str(e)
+
+        try:
+            await thumbnail_task
+        except Exception as e:
+            logger.exception("Thumbnail embedding failed for video_id=%s: %s", video_id, e)
 
         for outcome in outcomes:
             if isinstance(outcome, Exception):

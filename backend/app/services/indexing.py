@@ -988,6 +988,116 @@ class IndexingService:
             return results
 
     # ==========================================================================
+    # Thumbnail + caption search
+    # ==========================================================================
+
+    async def thumbnail_semantic_search_by_embedding(
+        self,
+        user_id: UUID,
+        query_embedding: list[float],
+        file_type: Optional[str] = None,
+        limit: int = 50,
+        similarity_threshold: float = 0.0,
+    ) -> list[tuple[IndexedFile, float]]:
+        """Search poster thumbnail embeddings (pgvector cosine). One score per file."""
+        conditions = [
+            IndexedFile.user_id == user_id,
+            IndexedFile.thumbnail_embedding.isnot(None),
+        ]
+        if file_type and file_type in ("video", "image"):
+            conditions.append(IndexedFile.file_type == file_type)
+
+        cosine_distance = IndexedFile.thumbnail_embedding.cosine_distance(query_embedding)
+        similarity_score = (1 - cosine_distance).label("similarity")
+        stmt = (
+            select(IndexedFile, similarity_score)
+            .where(and_(*conditions))
+            .order_by(cosine_distance)
+            .limit(limit)
+        )
+        with trace_vector_search("thumbnail_semantic_search", metadata={"limit": limit}) as span:
+            rows = (await self.session.execute(stmt)).all()
+            results = [
+                (file, float(score))
+                for file, score in rows
+                if score >= similarity_threshold
+            ]
+            if span:
+                span.update(metadata={"result_count": len(results)})
+            return results
+
+    async def description_lexical_search(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[tuple[IndexedFile, float]]:
+        """Full-text search over indexed_files.description (Instagram captions)."""
+        if not query or not query.strip():
+            return []
+
+        tsvector = func.to_tsvector("english", IndexedFile.description)
+        tsquery = func.websearch_to_tsquery("english", query)
+        rank = func.ts_rank(tsvector, tsquery).label("rank")
+        conditions = [
+            IndexedFile.user_id == user_id,
+            IndexedFile.description.isnot(None),
+            IndexedFile.description != "",
+            tsvector.op("@@")(tsquery),
+        ]
+        if file_type and file_type in ("video", "image"):
+            conditions.append(IndexedFile.file_type == file_type)
+
+        stmt = (
+            select(IndexedFile, rank)
+            .where(and_(*conditions))
+            .order_by(desc("rank"))
+            .limit(limit)
+        )
+        with trace_vector_search("description_lexical_search", metadata={"limit": limit}) as span:
+            rows = (await self.session.execute(stmt)).all()
+            results = [(file, float(score)) for file, score in rows]
+            if span:
+                span.update(metadata={"result_count": len(results)})
+            return results
+
+    async def description_semantic_search_by_embedding(
+        self,
+        user_id: UUID,
+        query_embedding: list[float],
+        file_type: Optional[str] = None,
+        limit: int = 50,
+        similarity_threshold: float = 0.0,
+    ) -> list[tuple[IndexedFile, float]]:
+        """Semantic search over caption/description embeddings."""
+        conditions = [
+            IndexedFile.user_id == user_id,
+            IndexedFile.description_embedding.isnot(None),
+        ]
+        if file_type and file_type in ("video", "image"):
+            conditions.append(IndexedFile.file_type == file_type)
+
+        cosine_distance = IndexedFile.description_embedding.cosine_distance(query_embedding)
+        similarity_score = (1 - cosine_distance).label("similarity")
+        stmt = (
+            select(IndexedFile, similarity_score)
+            .where(and_(*conditions))
+            .order_by(cosine_distance)
+            .limit(limit)
+        )
+        with trace_vector_search("description_semantic_search", metadata={"limit": limit}) as span:
+            rows = (await self.session.execute(stmt)).all()
+            results = [
+                (file, float(score))
+                for file, score in rows
+                if score >= similarity_threshold
+            ]
+            if span:
+                span.update(metadata={"result_count": len(results)})
+            return results
+
+    # ==========================================================================
     # Hybrid Search (Reciprocal Rank Fusion)
     # ==========================================================================
 
@@ -1002,26 +1112,18 @@ class IndexingService:
         rrf_k: int = RRF_K,
     ) -> list[dict]:
         """
-        Hybrid search fusing four retrieval legs with Reciprocal Rank Fusion:
+        Hybrid search fusing retrieval legs with Reciprocal Rank Fusion:
 
         1. Filename trigram similarity (lexical)
-        2. Vision embeddings over image thumbnails + video frames (semantic)
-        3. Transcript full-text search (lexical, with timestamps)
-        4. Transcript segment embeddings (semantic, with timestamps)
+        2. Poster thumbnail embeddings (semantic)
+        3. Video frame embeddings (semantic, with timestamps)
+        4. Caption/description full-text + embeddings
+        5. Transcript full-text + segment embeddings (with timestamps)
 
-        Each leg contributes 1 / (rrf_k + rank) per file; files ranked highly by
-        any leg (e.g. an exact transcript phrase match) surface near the top.
+        Each leg contributes 1 / (rrf_k + rank) per file. Thumbnail and frame
+        scores are kept separate; vision_score is their sum for older callers.
 
-        Returns dicts ordered by hybrid_score desc:
-        {
-            "file": IndexedFile,
-            "hybrid_score": float,        # total RRF score
-            "text_score": float,          # filename leg contribution
-            "vision_score": float,        # vision leg contribution
-            "transcript_score": float,    # transcript legs contribution
-            "matched_frame": dict | None,      # { frameImageUrl, timeSeconds, frameIndex }
-            "matched_transcript": dict | None, # { text, startSeconds, endSeconds, segmentIndex }
-        }
+        Returns dicts ordered by hybrid_score desc.
         """
         if not query or not query.strip():
             return []
@@ -1033,21 +1135,54 @@ class IndexingService:
             file_type=file_type,
             limit=fetch_limit,
         )
+        caption_lexical_results = await self.description_lexical_search(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
+        )
+        transcript_lexical_results = await self.transcript_lexical_search(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
+        )
 
         vision_service = get_vision_embedding_service()
         query_embedding: Optional[list[float]] = None
         if vision_service.is_configured:
             query_embedding = await vision_service.generate_text_embedding(query)
 
-        vision_results: list[tuple[IndexedFile, float, Optional[dict]]] = []
+        thumbnail_results: list[tuple[IndexedFile, float]] = []
+        frame_results: list[tuple[IndexedFile, VideoFrameEmbedding, float]] = []
+        caption_semantic_results: list[tuple[IndexedFile, float]] = []
         transcript_semantic_results: list[tuple[IndexedFile, VideoTranscriptSegment, float]] = []
         if query_embedding:
-            vision_results = await self.vision_semantic_search_unified_by_embedding(
+            thumbnail_results = await self.thumbnail_semantic_search_by_embedding(
                 user_id=user_id,
                 query_embedding=query_embedding,
                 file_type=file_type,
                 limit=fetch_limit,
-                similarity_threshold=0.0,
+            )
+            frame_results = await self._vision_search_video_frames(
+                user_id=user_id,
+                query_embedding=query_embedding,
+                file_type=file_type,
+                limit=fetch_limit,
+            )
+            seen_frame_files: set[UUID] = set()
+            unique_frames: list[tuple[IndexedFile, VideoFrameEmbedding, float]] = []
+            for item in frame_results:
+                if item[0].id in seen_frame_files:
+                    continue
+                seen_frame_files.add(item[0].id)
+                unique_frames.append(item)
+            frame_results = unique_frames
+            caption_semantic_results = await self.description_semantic_search_by_embedding(
+                user_id=user_id,
+                query_embedding=query_embedding,
+                file_type=file_type,
+                limit=fetch_limit,
             )
             transcript_semantic_results = await self.transcript_semantic_search_by_embedding(
                 user_id=user_id,
@@ -1056,33 +1191,64 @@ class IndexingService:
                 limit=fetch_limit,
             )
 
-        transcript_lexical_results = await self.transcript_lexical_search(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-        )
-
         files_by_id: dict[UUID, IndexedFile] = {}
         scores: dict[UUID, dict[str, float]] = {}
         matched_frames: dict[UUID, dict] = {}
-        # file_id -> (best contribution seen, matched segment info)
+        matched_thumbnails: dict[UUID, dict] = {}
+        matched_captions: dict[UUID, tuple[float, dict]] = {}
         matched_transcripts: dict[UUID, tuple[float, dict]] = {}
 
         def leg_scores(file_id: UUID) -> dict[str, float]:
             if file_id not in scores:
-                scores[file_id] = {"text": 0.0, "vision": 0.0, "transcript": 0.0}
+                scores[file_id] = {
+                    "text": 0.0,
+                    "thumbnail": 0.0,
+                    "frame": 0.0,
+                    "caption": 0.0,
+                    "transcript": 0.0,
+                }
             return scores[file_id]
 
         for rank, (file, _score) in enumerate(filename_results):
             files_by_id[file.id] = file
             leg_scores(file.id)["text"] += 1.0 / (rrf_k + rank + 1)
 
-        for rank, (file, _score, matched_frame) in enumerate(vision_results):
+        for rank, (file, _score) in enumerate(thumbnail_results):
             files_by_id[file.id] = file
-            leg_scores(file.id)["vision"] += 1.0 / (rrf_k + rank + 1)
-            if matched_frame:
-                matched_frames[file.id] = matched_frame
+            leg_scores(file.id)["thumbnail"] += 1.0 / (rrf_k + rank + 1)
+            if file.blob_thumbnail_url:
+                matched_thumbnails[file.id] = {
+                    "thumbnailImageUrl": get_blob_url_with_sas(file.blob_thumbnail_url),
+                }
+
+        for rank, (file, frame, _score) in enumerate(frame_results):
+            files_by_id[file.id] = file
+            contribution = 1.0 / (rrf_k + rank + 1)
+            existing_frame = matched_frames.get(file.id)
+            # Keep the best-ranked frame hit per file
+            if existing_frame is None:
+                leg_scores(file.id)["frame"] += contribution
+                matched_frames[file.id] = {
+                    "frameImageUrl": (
+                        get_blob_url_with_sas(frame.frame_image_url)
+                        if frame.frame_image_url
+                        else frame.frame_image_url
+                    ),
+                    "timeSeconds": frame.time_seconds,
+                    "frameIndex": frame.frame_index,
+                }
+
+        for caption_results in (caption_lexical_results, caption_semantic_results):
+            for rank, (file, _score) in enumerate(caption_results):
+                files_by_id[file.id] = file
+                contribution = 1.0 / (rrf_k + rank + 1)
+                leg_scores(file.id)["caption"] += contribution
+                existing = matched_captions.get(file.id)
+                if existing is None or contribution > existing[0]:
+                    matched_captions[file.id] = (
+                        contribution,
+                        {"text": file.description or ""},
+                    )
 
         for transcript_results in (transcript_lexical_results, transcript_semantic_results):
             for rank, (file, segment, _score) in enumerate(transcript_results):
@@ -1101,9 +1267,18 @@ class IndexingService:
                 "file": files_by_id[file_id],
                 "hybrid_score": sum(legs.values()),
                 "text_score": legs["text"],
-                "vision_score": legs["vision"],
+                "thumbnail_score": legs["thumbnail"],
+                "frame_score": legs["frame"],
+                "caption_score": legs["caption"],
                 "transcript_score": legs["transcript"],
+                "vision_score": legs["thumbnail"] + legs["frame"],
+                "matched_thumbnail": matched_thumbnails.get(file_id),
                 "matched_frame": matched_frames.get(file_id),
+                "matched_caption": (
+                    matched_captions[file_id][1]
+                    if file_id in matched_captions
+                    else None
+                ),
                 "matched_transcript": (
                     matched_transcripts[file_id][1]
                     if file_id in matched_transcripts

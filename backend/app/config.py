@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -309,6 +309,13 @@ class Settings(BaseSettings):
         validation_alias="WORKOS_REDIRECT_URI",
 
     )
+
+    @field_validator("workos_redirect_uri", mode="before")
+    @classmethod
+    def _normalize_workos_redirect_uri(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.replace("\\", "/")
+        return value
 
     workos_cookie_password: str = Field(
 

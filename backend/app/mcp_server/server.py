@@ -47,7 +47,12 @@ async def ingest_instagram_reel(url: str) -> dict:
     async with async_session_maker() as session:
         user = await get_bound_user(session)
         try:
-            return await _ingest_reel(url, user, session)
+            result = await _ingest_reel(url, user, session)
+            if result.get("blob_thumbnail_url"):
+                result["blob_thumbnail_url"] = get_blob_url_with_sas(
+                    result["blob_thumbnail_url"]
+                )
+            return result
         except InstagramIngestError as e:
             raise ValueError(str(e)) from e
 
@@ -55,13 +60,14 @@ async def ingest_instagram_reel(url: str) -> dict:
 @mcp.tool()
 async def search_clips(query: str, limit: int = 10) -> dict:
     """
-    Hybrid search over all indexed clips: filenames, visual frame content, and
-    spoken transcript (lexical + semantic, fused with reciprocal rank fusion).
+    Hybrid search over all indexed clips: filenames, poster thumbnails, visual
+    frame content, Instagram captions, and spoken transcript (lexical + semantic,
+    fused with reciprocal rank fusion).
 
     Each result includes links: instagram_url (original reel), video_url
-    (temporary playable link to the stored video, valid ~100 hours; null for
-    Google Drive files, which carry drive_url instead), and the best-matching
-    frame/transcript moment with timestamps in seconds.
+    (temporary playable link to the stored video, valid ~100 hours),
+    thumbnail_url (poster JPEG), and the best-matching frame/transcript moment
+    with timestamps in seconds.
 
     Args:
         query: Natural-language description of what is shown or said in the clip.
@@ -89,13 +95,33 @@ async def search_clips(query: str, limit: int = 10) -> dict:
                     "instagram_url": r["file"].source_url,
                     "drive_url": r["file"].drive_url,
                     "video_url": get_blob_url_with_sas(r["file"].blob_video_url),
+                    "thumbnail_url": get_blob_url_with_sas(r["file"].blob_thumbnail_url),
                     "hybrid_score": r["hybrid_score"],
+                    "text_score": r["text_score"],
+                    "thumbnail_score": r["thumbnail_score"],
+                    "frame_score": r["frame_score"],
+                    "caption_score": r["caption_score"],
+                    "transcript_score": r["transcript_score"],
+                    "matched_thumbnail": (
+                        {
+                            "thumbnail_image_url": r["matched_thumbnail"].get(
+                                "thumbnailImageUrl"
+                            ),
+                        }
+                        if r["matched_thumbnail"]
+                        else None
+                    ),
                     "matched_frame": (
                         {
                             "frame_image_url": r["matched_frame"].get("frameImageUrl"),
                             "time_seconds": r["matched_frame"].get("timeSeconds"),
                         }
                         if r["matched_frame"]
+                        else None
+                    ),
+                    "matched_caption": (
+                        {"text": r["matched_caption"].get("text")}
+                        if r["matched_caption"]
                         else None
                     ),
                     "matched_transcript": (

@@ -6,11 +6,11 @@ dev account with pre-existing indexed files, compares the ranked results to
 hand-written relevance judgments, and reports recall/precision/MRR/nDCG plus
 per-leg attribution.
 
-Because hybrid_search_rrf fuses four retrieval legs (filename trigram, vision
-embeddings, transcript lexical, transcript semantic), the aggregate score alone
-does not tell you which leg earned a hit. This eval also reports leg coverage:
-the share of relevant files each leg retrieved on its own. A drop in overall
-recall with vision coverage flat, for example, points at the transcript legs.
+Because hybrid_search_rrf fuses five retrieval legs (filename trigram, poster
+thumbnail embeddings, video frame embeddings, caption FTS/embeddings,
+transcript lexical + semantic), the aggregate score alone does not tell you
+which leg earned a hit. This eval also reports leg coverage: the share of
+relevant files each leg retrieved on its own.
 
 Usage:
     cd backend
@@ -179,7 +179,7 @@ def ndcg_at_k(ranked: list[UUID], gains: dict[UUID, float], k: int) -> float:
 # Per-query execution
 # ---------------------------------------------------------------------------
 
-LEGS = ("text", "vision", "transcript")
+LEGS = ("text", "thumbnail", "frame", "caption", "transcript")
 
 
 @dataclass
@@ -417,10 +417,10 @@ async def main() -> int:
     if not get_vision_embedding_service().is_configured:
         if not args.allow_unconfigured_vision:
             print(
-                "Gemini embeddings are not configured, so the vision and transcript-\n"
-                "semantic legs would return nothing and the scores below would\n"
-                "describe lexical-only search. Set GEMINI_API_KEY, or pass\n"
-                "--allow-unconfigured-vision if that is what you meant to measure.",
+                "Gemini embeddings are not configured, so the thumbnail, frame, caption-\n"
+                "semantic, and transcript-semantic legs would return nothing and the\n"
+                "scores below would describe lexical-only search. Set GEMINI_API_KEY, or\n"
+                "pass --allow-unconfigured-vision if that is what you meant to measure.",
                 file=sys.stderr,
             )
             return 2

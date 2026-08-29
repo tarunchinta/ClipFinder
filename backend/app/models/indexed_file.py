@@ -113,6 +113,11 @@ class IndexedFile(Base):
         String(1000),
         nullable=True
     )
+    # Azure Blob URL of the poster/preview JPEG (no SAS)
+    blob_thumbnail_url: Mapped[Optional[str]] = mapped_column(
+        String(1000),
+        nullable=True
+    )
 
     # Metadata reported by the source platform (populated for Instagram reels;
     # NULL for Drive files, which carry no equivalent fields).
@@ -123,6 +128,11 @@ class IndexedFile(Base):
     # Post caption / full description text
     description: Mapped[Optional[str]] = mapped_column(
         Text,
+        nullable=True
+    )
+    # Gemini text embedding of description (document-side, 768-d)
+    description_embedding: Mapped[Optional[list]] = mapped_column(
+        Vector(768),
         nullable=True
     )
     # Handle of the account that posted the media (e.g. Instagram @username);
@@ -174,6 +184,11 @@ class IndexedFile(Base):
     
     # Vision embedding for image-based semantic search (768 dimensions for Gemini Embedding 2)
     vision_embedding: Mapped[Optional[list]] = mapped_column(
+        Vector(768),
+        nullable=True
+    )
+    # Poster thumbnail embedding (one vector per file; distinct from per-frame embeddings)
+    thumbnail_embedding: Mapped[Optional[list]] = mapped_column(
         Vector(768),
         nullable=True
     )

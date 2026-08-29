@@ -63,7 +63,7 @@ def _download_reel_sync(url: str, out_dir: str) -> dict:
     """
     Download a reel with yt-dlp. Returns the video id, the metadata Instagram
     reports about the post (title, description, channel, uploader,
-    uploader_id, published_at, duration) and the downloaded file path.
+    uploader_id, published_at, duration, thumbnail URL) and the downloaded file path.
     """
     from yt_dlp import YoutubeDL
     from yt_dlp.utils import DownloadError
@@ -92,6 +92,7 @@ def _download_reel_sync(url: str, out_dir: str) -> dict:
         "uploader_id": info.get("uploader_id"),
         "published_at": _timestamp_to_datetime(info.get("timestamp")),
         "duration": info.get("duration"),
+        "thumbnail": info.get("thumbnail"),
         "file_path": file_path,
     }
 
@@ -125,6 +126,20 @@ def _upload_video_to_azure_blob_sync(blob_path: str, file_path: str) -> str | No
         return blob_client.url
     except Exception as e:
         logger.error("Azure Blob video upload failed: %s", e)
+        return None
+
+
+def _download_url_bytes_sync(url: str) -> bytes | None:
+    """Download raw bytes from a public URL (yt-dlp thumbnail)."""
+    try:
+        import httpx
+
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            return response.content
+    except Exception as e:
+        logger.warning("Failed to download thumbnail from %s: %s", url[:120], e)
         return None
 
 
@@ -240,6 +255,44 @@ async def ingest_instagram_reel(
         indexed_file.updated_at = datetime.utcnow()
         await session.commit()
 
+        from app.services.vision_embedding import get_vision_embedding_service
+        from app.services.video_frame_indexing import upload_thumbnail_jpeg_sync
+
+        vision = get_vision_embedding_service()
+        thumbnail_url = info.get("thumbnail")
+        if thumbnail_url:
+            thumb_bytes = await loop.run_in_executor(
+                None, functools.partial(_download_url_bytes_sync, thumbnail_url)
+            )
+            if thumb_bytes:
+                blob_thumbnail_url = await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        upload_thumbnail_jpeg_sync,
+                        user.id,
+                        indexed_file.id,
+                        thumb_bytes,
+                    ),
+                )
+                if blob_thumbnail_url:
+                    indexed_file.blob_thumbnail_url = blob_thumbnail_url
+                    if vision.is_configured:
+                        thumb_embedding = await vision.generate_embedding_from_image_bytes(
+                            thumb_bytes
+                        )
+                        if thumb_embedding:
+                            indexed_file.thumbnail_embedding = thumb_embedding
+                    indexed_file.updated_at = datetime.utcnow()
+                    await session.commit()
+
+        caption = indexed_file.description
+        if caption and vision.is_configured:
+            desc_embedding = await vision.generate_document_text_embedding(caption)
+            if desc_embedding:
+                indexed_file.description_embedding = desc_embedding
+                indexed_file.updated_at = datetime.utcnow()
+                await session.commit()
+
     try:
         publish_video_indexing_jobs([indexed_file], [{}])
     except Exception:
@@ -269,6 +322,7 @@ async def ingest_instagram_reel(
         "source_url": url,
         "file_path": blob_path,
         "blob_url": indexed_file.blob_video_url,
+        "blob_thumbnail_url": indexed_file.blob_thumbnail_url,
         "status": indexed_file.indexing_status,
         "deduplicated": existing_id is not None,
     }
