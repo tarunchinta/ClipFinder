@@ -71,9 +71,6 @@ service-account*.json
 *.onnx
 *.npy
 *.npz
-# Downloaded ML weights only — must stay root-scoped, a bare "models/"
-# also matches backend/app/models/ and silently drops new ORM models.
-/models/
 .cache/
 .huggingface/
 
