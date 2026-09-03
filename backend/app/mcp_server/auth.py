@@ -16,7 +16,7 @@ class StaticBearerAuthMiddleware:
     """
     Pure ASGI middleware wrapping only the MCP sub-app. Accepts
     "Authorization: Bearer <OAuth access token>" issued by /mcp-oauth/token
-    after WorkOS AuthKit login + consent.
+    after WorkOS AuthKit login (auto-approved MCP OAuth).
 
     401 responses carry a WWW-Authenticate pointer to the protected-resource
     metadata so OAuth-capable clients can discover the authorization server.

@@ -30,6 +30,12 @@ from app.observability import (
     trace_index_file,
     trace_video_frame,
 )
+from app.services.color_signature import (
+    apply_color_signature,
+    merge_signatures,
+    signature_from_image_bytes,
+    signature_from_jpeg_path,
+)
 from app.services.transcription import transcribe_video_with_own_session
 from app.services.vision_embedding import get_vision_embedding_service
 
@@ -299,6 +305,27 @@ def _download_frame_from_azure_blob(container_name: str, blob_path: str) -> byte
         return blob_client.download_blob().readall()
     except Exception as e:
         logger.error(f"Azure Blob download failed for {blob_path}: {e}")
+        return None
+
+
+def download_stored_image_bytes_sync(image_url: str | None) -> bytes | None:
+    """Download JPEG bytes from an Azure Blob URL (or any http URL)."""
+    if not image_url:
+        return None
+    if "blob.core.windows.net" in image_url:
+        parsed = urlparse(image_url)
+        path_parts = parsed.path.strip("/").split("/", 1)
+        if len(path_parts) == 2:
+            data = _download_frame_from_azure_blob(path_parts[0], path_parts[1])
+            if data:
+                return data
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(image_url, timeout=30) as resp:
+            return resp.read()
+    except Exception as e:
+        logger.warning("Failed to download image %s: %s", image_url[:120], e)
         return None
 
 
@@ -795,20 +822,41 @@ async def index_image_thumbnail(
             return result
 
         vision = get_vision_embedding_service()
-        if not vision.is_configured:
-            result["error"] = "Vision embedding service not configured"
-            return result
 
         row.vision_indexing_status = IndexingStatus.PROCESSING.value
         row.updated_at = datetime.utcnow()
         await session.commit()
 
-        embedding = await vision.generate_embedding(
-            row.thumbnail_url,
-            mode="image",
-            drive_file_id=row.drive_file_id,
-            google_access_token=google_access_token,
-        )
+        actual_url = row.thumbnail_url
+        if row.drive_file_id and google_access_token:
+            fresh_url = await vision._get_fresh_thumbnail_url(
+                row.drive_file_id, google_access_token
+            )
+            if fresh_url:
+                actual_url = fresh_url
+
+        image_bytes = await vision._download_image(actual_url, google_access_token)
+        if not image_bytes:
+            row.vision_indexing_status = IndexingStatus.FAILED.value
+            row.error_message = "Failed to download thumbnail"
+            row.updated_at = datetime.utcnow()
+            await session.commit()
+            result["error"] = row.error_message
+            return result
+
+        sig = signature_from_image_bytes(image_bytes)
+        if sig:
+            apply_color_signature(row, sig)
+
+        if not vision.is_configured:
+            now = datetime.utcnow()
+            row.vision_indexing_status = None
+            row.updated_at = now
+            await session.commit()
+            result["success"] = True
+            return result
+
+        embedding = await vision.generate_embedding_from_image_bytes(image_bytes)
         if not embedding:
             row.vision_indexing_status = IndexingStatus.FAILED.value
             row.error_message = "Failed to generate vision embedding"
@@ -855,6 +903,42 @@ async def _embed_thumbnail_with_own_session(
         if not row:
             return False
         row.thumbnail_embedding = embedding
+        row.updated_at = datetime.utcnow()
+        await session.commit()
+    return True
+
+
+def _signatures_from_jpeg_paths(jpeg_paths: list[str]):
+    sigs = []
+    for path in jpeg_paths:
+        if not path or not os.path.isfile(path):
+            continue
+        sig = signature_from_jpeg_path(path)
+        if sig:
+            sigs.append(sig)
+    return merge_signatures(sigs)
+
+
+async def _write_color_signature_with_own_session(
+    video_id: UUID,
+    jpeg_paths: list[str],
+) -> bool:
+    """Aggregate Lab signatures from local frame JPEGs onto indexed_files."""
+    loop = asyncio.get_running_loop()
+    merged = await loop.run_in_executor(
+        None,
+        functools.partial(_signatures_from_jpeg_paths, jpeg_paths),
+    )
+    if not merged:
+        logger.warning("Color signature extract produced nothing for video_id=%s", video_id)
+        return False
+    async with async_session_maker() as session:
+        row = (
+            await session.execute(select(IndexedFile).where(IndexedFile.id == video_id))
+        ).scalar_one_or_none()
+        if not row:
+            return False
+        apply_color_signature(row, merged)
         row.updated_at = datetime.utcnow()
         await session.commit()
     return True
@@ -954,6 +1038,13 @@ async def run_frame_indexing_for_video(
                 os.path.join(tmpdir, "thumbnail.jpg"),
             )
         )
+        jpeg_paths = [frame.local_jpeg_path for frame in frames]
+        poster_path = os.path.join(tmpdir, "thumbnail.jpg")
+        if os.path.isfile(poster_path):
+            jpeg_paths.append(poster_path)
+        color_task = asyncio.create_task(
+            _write_color_signature_with_own_session(video_id, jpeg_paths)
+        )
 
         outcomes = await asyncio.gather(
             *[
@@ -981,6 +1072,11 @@ async def run_frame_indexing_for_video(
             await thumbnail_task
         except Exception as e:
             logger.exception("Thumbnail embedding failed for video_id=%s: %s", video_id, e)
+
+        try:
+            await color_task
+        except Exception as e:
+            logger.exception("Color signature failed for video_id=%s: %s", video_id, e)
 
         for outcome in outcomes:
             if isinstance(outcome, Exception):

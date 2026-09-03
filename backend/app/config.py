@@ -284,7 +284,7 @@ class Settings(BaseSettings):
 
     )
 
-    # WorkOS AuthKit (Google social login before MCP consent)
+    # WorkOS AuthKit (Google social login; auto-approves MCP OAuth)
 
     workos_api_key: str = Field(
 

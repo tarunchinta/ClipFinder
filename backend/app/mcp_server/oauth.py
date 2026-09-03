@@ -1,8 +1,9 @@
 """Minimal OAuth 2.1 authorization server for claude.ai custom connectors.
 
-Claude runs authorization-code + PKCE against these endpoints. Before consent,
-the human signs in via WorkOS AuthKit (Google social login). MCP access tokens
-carry the ClipFinder user id in `sub` so tools scope search to that account.
+Claude runs authorization-code + PKCE against these endpoints. The human signs
+in via WorkOS AuthKit (Google social login); a successful login auto-approves
+the MCP connection (no separate consent screen). MCP access tokens carry the
+ClipFinder user id in `sub` so tools scope search to that account.
 """
 
 import base64
@@ -221,11 +222,10 @@ async def workos_callback(
     code: str = "",
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Exchange WorkOS AuthKit code, seal session, upsert ClipFinder user."""
+    """Exchange WorkOS AuthKit code, seal session, auto-approve MCP OAuth."""
     if not code:
         return RedirectResponse("/mcp-oauth/login", status_code=302)
 
-    settings = get_settings()
     try:
         client = get_workos_client()
         auth_response = client.user_management.authenticate_with_code(code=code)
@@ -233,18 +233,40 @@ async def workos_callback(
         logger.error("WorkOS authenticate_with_code failed: %s", exc)
         return HTMLResponse(f"Authentication failed: {exc}", status_code=401)
 
-    await resolve_clipfinder_user(session, auth_response.user)
-
+    sealed = seal_auth_response(auth_response)
     pending = get_pending_oauth_params(request)
     if pending:
-        base = settings.app_url.rstrip("/")
-        redirect_to = f"{base}/mcp-oauth/authorize?{pending_oauth_query(pending)}"
-    else:
-        redirect_to = f"{settings.app_url.rstrip('/')}/mcp-oauth/authorize"
+        error = _validate_authorize_params(
+            pending.get("client_id", ""),
+            pending.get("redirect_uri", ""),
+            "code",
+            pending.get("code_challenge", ""),
+            "S256",
+        )
+        if error:
+            response = templates.TemplateResponse(
+                "mcp_consent.html",
+                _consent_context(request, error=error),
+                status_code=400,
+            )
+            set_wos_session_cookie(response, sealed)
+            clear_pending_oauth_cookie(response)
+            return response
+        return await _auto_approve_redirect(
+            session,
+            workos_user=auth_response.user,
+            client_id=pending["client_id"],
+            redirect_uri=pending["redirect_uri"],
+            state=pending.get("state", ""),
+            code_challenge=pending["code_challenge"],
+            sealed_session=sealed,
+        )
 
-    response = RedirectResponse(redirect_to, status_code=302)
-    set_wos_session_cookie(response, seal_auth_response(auth_response))
-    clear_pending_oauth_cookie(response)
+    response = HTMLResponse(
+        "Signed in successfully. Start the MCP connection from Claude to continue.",
+        status_code=200,
+    )
+    set_wos_session_cookie(response, sealed)
     return response
 
 
@@ -263,8 +285,44 @@ async def mcp_logout(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Authorization endpoint (consent page)
+# Authorization endpoint (auto-approve after AuthKit login)
 # ---------------------------------------------------------------------------
+
+async def _auto_approve_redirect(
+    session: AsyncSession,
+    *,
+    workos_user: Any,
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    code_challenge: str,
+    sealed_session: str | None = None,
+) -> RedirectResponse:
+    """Issue an authorization code and redirect back to the MCP client."""
+    clipfinder_user = await resolve_clipfinder_user(session, workos_user)
+    auth_code = _sign(
+        {
+            "token_use": "mcp_code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "sub": str(clipfinder_user.id),
+        },
+        aud=CODE_AUD,
+        lifetime_seconds=CODE_LIFETIME_SECONDS,
+    )
+    params: dict[str, str] = {"code": auth_code}
+    if state:
+        params["state"] = state
+    response = RedirectResponse(
+        f"{redirect_uri}?{urlencode(params)}", status_code=302
+    )
+    if sealed_session:
+        set_wos_session_cookie(response, sealed_session)
+    clear_pending_oauth_cookie(response)
+    logger.info("MCP OAuth: auto-approved for user %s", clipfinder_user.id)
+    return response
+
 
 def _validate_authorize_params(
     client_id: str,
@@ -289,12 +347,6 @@ def _validate_authorize_params(
     return None
 
 
-def _workos_email(workos_user: Any) -> str | None:
-    from app.mcp_server.workos_auth import _workos_user_to_dict
-
-    return _workos_user_to_dict(workos_user).get("email")
-
-
 def _consent_context(
     request: Request,
     *,
@@ -316,7 +368,7 @@ def _consent_context(
     }
 
 
-@router.get("/mcp-oauth/authorize", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/mcp-oauth/authorize", include_in_schema=False)
 async def authorize_page(
     request: Request,
     client_id: str = "",
@@ -325,6 +377,7 @@ async def authorize_page(
     state: str = "",
     code_challenge: str = "",
     code_challenge_method: str = "",
+    session: AsyncSession = Depends(get_async_session),
 ):
     error = _validate_authorize_params(
         client_id, redirect_uri, response_type, code_challenge, code_challenge_method
@@ -337,7 +390,7 @@ async def authorize_page(
         )
 
     wos = get_workos_user_from_request(request)
-    if not wos.authenticated:
+    if not wos.authenticated or not wos.user:
         params = {
             "client_id": client_id,
             "redirect_uri": redirect_uri,
@@ -349,31 +402,19 @@ async def authorize_page(
         set_pending_oauth_cookie(response, params)
         return response
 
-    if wos.sealed_session and wos.sealed_session != request.cookies.get(WOS_SESSION_COOKIE):
-        response = templates.TemplateResponse(
-            "mcp_consent.html",
-            _consent_context(
-                request,
-                client_id=client_id,
-                redirect_uri=redirect_uri,
-                state=state,
-                code_challenge=code_challenge,
-                user_email=_workos_email(wos.user),
-            ),
-        )
-        set_wos_session_cookie(response, wos.sealed_session)
-        return response
-
-    return templates.TemplateResponse(
-        "mcp_consent.html",
-        _consent_context(
-            request,
-            client_id=client_id,
-            redirect_uri=redirect_uri,
-            state=state,
-            code_challenge=code_challenge,
-            user_email=_workos_email(wos.user),
-        ),
+    sealed = (
+        wos.sealed_session
+        if wos.sealed_session and wos.sealed_session != request.cookies.get(WOS_SESSION_COOKIE)
+        else None
+    )
+    return await _auto_approve_redirect(
+        session,
+        workos_user=wos.user,
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        state=state,
+        code_challenge=code_challenge,
+        sealed_session=sealed,
     )
 
 
@@ -409,24 +450,13 @@ async def authorize_approve(
         set_pending_oauth_cookie(response, params)
         return response
 
-    clipfinder_user = await resolve_clipfinder_user(session, wos.user)
-
-    code = _sign(
-        {
-            "token_use": "mcp_code",
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "code_challenge": code_challenge,
-            "sub": str(clipfinder_user.id),
-        },
-        aud=CODE_AUD,
-        lifetime_seconds=CODE_LIFETIME_SECONDS,
-    )
-    params = {"code": code}
-    if state:
-        params["state"] = state
-    return RedirectResponse(
-        f"{redirect_uri}?{urlencode(params)}", status_code=302
+    return await _auto_approve_redirect(
+        session,
+        workos_user=wos.user,
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        state=state,
+        code_challenge=code_challenge,
     )
 
 

@@ -19,6 +19,11 @@ from app.observability import (
     trace_index_file,
     trace_vector_search,
 )
+from app.services.color_signature import (
+    encode_query as encode_color_query,
+    histogram_intersection,
+    signature_from_row,
+)
 from app.services.video_frame_indexing import get_blob_url_with_sas
 from app.services.vision_embedding import get_vision_embedding_service
 
@@ -1097,6 +1102,52 @@ class IndexingService:
                 span.update(metadata={"result_count": len(results)})
             return results
 
+    async def color_search(
+        self,
+        user_id: UUID,
+        query: str,
+        file_type: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[tuple[IndexedFile, float]]:
+        """
+        Rank files by Lab chroma-histogram intersection against a lexicon probe.
+
+        Returns [] when the query has no color language, so this leg cannot
+        inject noise into content-only searches.
+        """
+        probe = encode_color_query(query)
+        if probe is None:
+            return []
+
+        conditions = [
+            IndexedFile.user_id == user_id,
+            IndexedFile.color_histogram.isnot(None),
+        ]
+        if file_type:
+            conditions.append(IndexedFile.file_type == file_type)
+
+        stmt = select(IndexedFile).where(and_(*conditions))
+        with trace_vector_search("color_signature_search", metadata={"limit": limit}) as span:
+            rows = list((await self.session.execute(stmt)).scalars().all())
+            scored: list[tuple[IndexedFile, float]] = []
+            for file in rows:
+                stored = signature_from_row(file)
+                if stored is None:
+                    continue
+                score = histogram_intersection(probe.histogram, stored.histogram)
+                if score > 0:
+                    scored.append((file, score))
+            scored.sort(key=lambda item: item[1], reverse=True)
+            results = scored[:limit]
+            if span:
+                span.update(
+                    metadata={
+                        "result_count": len(results),
+                        "candidates": len(rows),
+                    }
+                )
+            return results
+
     # ==========================================================================
     # Hybrid Search (Reciprocal Rank Fusion)
     # ==========================================================================
@@ -1119,6 +1170,7 @@ class IndexingService:
         3. Video frame embeddings (semantic, with timestamps)
         4. Caption/description full-text + embeddings
         5. Transcript full-text + segment embeddings (with timestamps)
+        6. Color signature (Lab histogram; skipped when the query has no color language)
 
         Each leg contributes 1 / (rrf_k + rank) per file. Thumbnail and frame
         scores are kept separate; vision_score is their sum for older callers.
@@ -1142,6 +1194,12 @@ class IndexingService:
             limit=fetch_limit,
         )
         transcript_lexical_results = await self.transcript_lexical_search(
+            user_id=user_id,
+            query=query,
+            file_type=file_type,
+            limit=fetch_limit,
+        )
+        color_results = await self.color_search(
             user_id=user_id,
             query=query,
             file_type=file_type,
@@ -1206,6 +1264,7 @@ class IndexingService:
                     "frame": 0.0,
                     "caption": 0.0,
                     "transcript": 0.0,
+                    "color": 0.0,
                 }
             return scores[file_id]
 
@@ -1262,6 +1321,10 @@ class IndexingService:
                         self._transcript_match_info(segment, query=query),
                     )
 
+        for rank, (file, _score) in enumerate(color_results):
+            files_by_id[file.id] = file
+            leg_scores(file.id)["color"] += 1.0 / (rrf_k + rank + 1)
+
         combined = [
             {
                 "file": files_by_id[file_id],
@@ -1271,6 +1334,7 @@ class IndexingService:
                 "frame_score": legs["frame"],
                 "caption_score": legs["caption"],
                 "transcript_score": legs["transcript"],
+                "color_score": legs["color"],
                 "vision_score": legs["thumbnail"] + legs["frame"],
                 "matched_thumbnail": matched_thumbnails.get(file_id),
                 "matched_frame": matched_frames.get(file_id),

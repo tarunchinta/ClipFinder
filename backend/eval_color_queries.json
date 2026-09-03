@@ -1,0 +1,33 @@
+{
+  "description": "Color-signature RRF leg: grade-only, mixed content+grade, and a no-color control. Replace drive_file_id values with files in the eval account.",
+  "default_k": 10,
+  "queries": [
+    {
+      "query": "teal and orange grade",
+      "file_type": "video",
+      "notes": "Grade-only. Gemini vision should not be the reason this hits; the color leg must fire.",
+      "expect_color_leg": true,
+      "relevant": [
+        {"drive_file_id": "instagram:REPLACE_TEAL_ORANGE_CLIP", "gain": 3}
+      ]
+    },
+    {
+      "query": "teal and orange person walking",
+      "file_type": "video",
+      "notes": "Mixed content+grade. Content legs rank walking; color ranks the look; RRF fuses both.",
+      "expect_color_leg": true,
+      "relevant": [
+        {"drive_file_id": "instagram:REPLACE_TEAL_ORANGE_WALKING_CLIP", "gain": 3}
+      ]
+    },
+    {
+      "query": "person walking",
+      "file_type": "video",
+      "notes": "No-color control. The color leg must not contribute; color_score must stay 0 on every hit.",
+      "expect_color_leg": false,
+      "relevant": [
+        {"drive_file_id": "instagram:REPLACE_WALKING_CLIP", "gain": 1}
+      ]
+    }
+  ]
+}

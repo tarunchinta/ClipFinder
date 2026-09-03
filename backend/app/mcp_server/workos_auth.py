@@ -7,9 +7,9 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import bcrypt
 from fastapi import Request, Response
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from workos import WorkOSClient
@@ -25,7 +25,10 @@ PENDING_OAUTH_COOKIE = "mcp_oauth_pending"
 PENDING_OAUTH_AUD = "clipfinder-mcp-pending"
 PENDING_OAUTH_LIFETIME_SECONDS = 600
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _unusable_password_hash() -> str:
+    """Placeholder hash for WorkOS-only users (no password login)."""
+    return bcrypt.hashpw(secrets.token_urlsafe(32).encode(), bcrypt.gensalt()).decode()
 
 
 def workos_configured() -> bool:
@@ -300,7 +303,7 @@ async def upsert_user_from_workos(
 
     user = User(
         email=email,
-        hashed_password=_pwd_context.hash(secrets.token_urlsafe(32)),
+        hashed_password=_unusable_password_hash(),
         is_active=True,
         is_verified=True,
         is_superuser=False,

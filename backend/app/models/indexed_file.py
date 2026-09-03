@@ -9,7 +9,7 @@ from sqlalchemy import (
     Column, String, BigInteger, Integer, Float, Text, DateTime,
     ForeignKey, Index, UniqueConstraint
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
@@ -192,6 +192,20 @@ class IndexedFile(Base):
         Vector(768),
         nullable=True
     )
+    # Content-blind look/grade signature (Lab chroma histogram + split-tone palette).
+    # Ranked by histogram intersection, not Gemini cosine — see color_signature.py.
+    color_histogram: Mapped[Optional[list]] = mapped_column(
+        Vector(256),
+        nullable=True,
+    )
+    color_palette: Mapped[Optional[list]] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+    color_mean_l: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    color_std_l: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    color_mean_a: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    color_mean_b: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     
     # Vision indexing status tracking
     vision_indexing_status: Mapped[Optional[str]] = mapped_column(

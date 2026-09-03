@@ -276,14 +276,22 @@ async def ingest_instagram_reel(
                 )
                 if blob_thumbnail_url:
                     indexed_file.blob_thumbnail_url = blob_thumbnail_url
-                    if vision.is_configured:
-                        thumb_embedding = await vision.generate_embedding_from_image_bytes(
-                            thumb_bytes
-                        )
-                        if thumb_embedding:
-                            indexed_file.thumbnail_embedding = thumb_embedding
-                    indexed_file.updated_at = datetime.utcnow()
-                    await session.commit()
+                if vision.is_configured:
+                    thumb_embedding = await vision.generate_embedding_from_image_bytes(
+                        thumb_bytes
+                    )
+                    if thumb_embedding:
+                        indexed_file.thumbnail_embedding = thumb_embedding
+                from app.services.color_signature import (
+                    apply_color_signature,
+                    signature_from_image_bytes,
+                )
+
+                color_sig = signature_from_image_bytes(thumb_bytes)
+                if color_sig:
+                    apply_color_signature(indexed_file, color_sig)
+                indexed_file.updated_at = datetime.utcnow()
+                await session.commit()
 
         caption = indexed_file.description
         if caption and vision.is_configured:

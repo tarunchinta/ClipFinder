@@ -50,6 +50,7 @@ def _format_search_results(query: str, results: list) -> dict[str, Any]:
                 "frame_score": r["frame_score"],
                 "caption_score": r["caption_score"],
                 "transcript_score": r["transcript_score"],
+                "color_score": r["color_score"],
                 "matched_thumbnail": (
                     {
                         "thumbnail_image_url": r["matched_thumbnail"].get(
@@ -119,8 +120,9 @@ def _search_ui_csp() -> ResourceCsp:
 async def search_clips(query: str, limit: int = 10) -> dict[str, Any]:
     """
     Hybrid search over all indexed clips: filenames, poster thumbnails, visual
-    frame content, Instagram captions, and spoken transcript (lexical + semantic,
-    fused with reciprocal rank fusion).
+    frame content, Instagram captions, spoken transcript, and color grade
+    (lexical + semantic legs fused with reciprocal rank fusion; the color
+    leg only runs when the query names a look).
 
     Each result includes links: instagram_url (original reel), video_url
     (temporary playable link to the stored video, valid ~100 hours),

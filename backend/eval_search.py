@@ -6,11 +6,11 @@ dev account with pre-existing indexed files, compares the ranked results to
 hand-written relevance judgments, and reports recall/precision/MRR/nDCG plus
 per-leg attribution.
 
-Because hybrid_search_rrf fuses five retrieval legs (filename trigram, poster
+Because hybrid_search_rrf fuses six retrieval legs (filename trigram, poster
 thumbnail embeddings, video frame embeddings, caption FTS/embeddings,
-transcript lexical + semantic), the aggregate score alone does not tell you
-which leg earned a hit. This eval also reports leg coverage: the share of
-relevant files each leg retrieved on its own.
+transcript lexical + semantic, color signature), the aggregate score alone
+does not tell you which leg earned a hit. This eval also reports leg coverage:
+the share of relevant files each leg retrieved on its own.
 
 Usage:
     cd backend
@@ -70,6 +70,9 @@ class QueryCase:
     relevant: list[Judgment]
     file_type: Optional[str] = None
     notes: str = ""
+    # None = do not check. False = color_score must be 0 on every hit
+    # (query has no color language). True = the color leg must fire.
+    expect_color_leg: Optional[bool] = None
 
 
 @dataclass
@@ -91,6 +94,7 @@ def load_query_set(path: Path) -> QuerySet:
           "query": "sourdough starter explainer",
           "file_type": "video",
           "notes": "the two baking reels, the first is the better answer",
+          "expect_color_leg": false,
           "relevant": [
             {"drive_file_id": "instagram:DAcuKpJyzZq", "gain": 3},
             {"drive_file_id": "instagram:C8xY1zQrLmN"}
@@ -102,6 +106,9 @@ def load_query_set(path: Path) -> QuerySet:
     "gain" is optional and defaults to 1.0, which makes judgments binary. Use
     graded gains (3 = ideal answer, 1 = acceptable) to make nDCG meaningful;
     recall/precision/MRR treat any listed file as relevant either way.
+
+    "expect_color_leg" is optional. false asserts the color RRF leg contributed
+    nothing (content-only query). true asserts it fired. Omit to skip the check.
     """
     raw = json.loads(path.read_text())
     queries = []
@@ -117,12 +124,16 @@ def load_query_set(path: Path) -> QuerySet:
         ]
         if not judgments:
             raise ValueError(f"queries[{i}] ({case['query']!r}) lists no relevant files")
+        expect = case.get("expect_color_leg")
+        if expect is not None:
+            expect = bool(expect)
         queries.append(
             QueryCase(
                 query=case["query"],
                 relevant=judgments,
                 file_type=case.get("file_type"),
                 notes=case.get("notes", ""),
+                expect_color_leg=expect,
             )
         )
     if not queries:
@@ -179,7 +190,7 @@ def ndcg_at_k(ranked: list[UUID], gains: dict[UUID, float], k: int) -> float:
 # Per-query execution
 # ---------------------------------------------------------------------------
 
-LEGS = ("text", "thumbnail", "frame", "caption", "transcript")
+LEGS = ("text", "thumbnail", "frame", "caption", "transcript", "color")
 
 
 @dataclass
@@ -194,6 +205,7 @@ class QueryResult:
     leg_hits: dict[str, int] = field(default_factory=dict)
     unresolved: list[str] = field(default_factory=list)
     resolved_count: int = 0
+    color_leg_fired: bool = False
 
 
 async def resolve_user(session, identifier: str) -> User:
@@ -274,6 +286,7 @@ async def run_case(
         leg_hits=leg_hits,
         unresolved=unresolved,
         resolved_count=len(relevant_ids),
+        color_leg_fired=any(r.get("color_score", 0.0) > 0 for r in results),
     )
 
 
@@ -315,6 +328,18 @@ def print_report(results: list[QueryResult], k: int) -> None:
         for fid in sorted(unresolved):
             print(f"  - {fid}")
 
+    contracts = [r for r in results if r.case.expect_color_leg is not None]
+    if contracts:
+        print("\nColor-leg contract (expect_color_leg):")
+        for r in contracts:
+            expected = r.case.expect_color_leg
+            ok = r.color_leg_fired is expected
+            status = "PASS" if ok else "FAIL"
+            print(
+                f"  {status}  fired={r.color_leg_fired} expected={expected}  "
+                f"{r.case.query}"
+            )
+
 
 def build_json_report(results: list[QueryResult], k: int, meta: dict) -> dict:
     n = len(results) or 1
@@ -344,6 +369,8 @@ def build_json_report(results: list[QueryResult], k: int, meta: dict) -> dict:
                 "mrr": r.mrr,
                 "ndcg_at_k": r.ndcg,
                 "leg_hits": r.leg_hits,
+                "color_leg_fired": r.color_leg_fired,
+                "expect_color_leg": r.case.expect_color_leg,
                 "unresolved": r.unresolved,
                 "top_results": [str(fid) for fid in r.ranked[:k]],
             }

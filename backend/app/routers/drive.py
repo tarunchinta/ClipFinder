@@ -697,6 +697,7 @@ class VisionHybridSearchFileInfo(BaseModel):
     textScore: float
     visionScore: float
     transcriptScore: float = 0.0
+    colorScore: float = 0.0
     hybridScore: float
     matchedFrame: Optional[MatchedFrameInfo] = None
     matchedTranscript: Optional[MatchedTranscriptInfo] = None
@@ -858,10 +859,12 @@ async def vision_hybrid_search_files(
     session: AsyncSession = Depends(get_async_session),
 ):
     """
-    Hybrid search fusing lexical and semantic legs with Reciprocal Rank Fusion (RRF).
+    Hybrid search fusing lexical, semantic, and color-grade legs with Reciprocal
+    Rank Fusion (RRF).
 
     Legs: filename trigram similarity, Gemini vision embeddings (thumbnails +
-    video frames), transcript full-text search, and transcript segment embeddings.
+    video frames), transcript full-text search, transcript segment embeddings,
+    and a Lab color signature (only when the query names a look/grade).
     Each leg contributes 1/(k + rank) per file; a clip whose spoken words match
     the query ranks high and carries the matched segment's timestamp.
 
@@ -910,6 +913,7 @@ async def vision_hybrid_search_files(
                             "text_score": round(r["text_score"], 4),
                             "vision_score": round(r["vision_score"], 4),
                             "transcript_score": round(r["transcript_score"], 4),
+                            "color_score": round(r["color_score"], 4),
                             "hybrid_score": round(r["hybrid_score"], 4),
                             "matched_frame": r["matched_frame"] is not None,
                             "matched_transcript": r["matched_transcript"] is not None,
@@ -937,6 +941,7 @@ async def vision_hybrid_search_files(
             textScore=r["text_score"],
             visionScore=r["vision_score"],
             transcriptScore=r["transcript_score"],
+            colorScore=r["color_score"],
             hybridScore=r["hybrid_score"],
             matchedFrame=MatchedFrameInfo(**r["matched_frame"]) if r["matched_frame"] else None,
             matchedTranscript=(
