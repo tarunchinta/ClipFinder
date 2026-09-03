@@ -83,30 +83,48 @@
     .error { color: #fca5a5; }
     .card {
       display: grid;
-      grid-template-columns: 112px 1fr;
+      grid-template-columns: 112px minmax(0, 1fr);
       gap: 10px;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 10px;
       overflow: hidden;
+      /* Never let the column flexbox squeeze a card below its content height,
+         otherwise overflow:hidden clips the creator name and action buttons. */
+      flex: 0 0 auto;
     }
     .thumb {
       width: 112px;
-      height: 84px;
+      min-height: 84px;
       background: var(--bg-secondary);
       position: relative;
+      overflow: hidden;
     }
-    .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-    .thumb .ph {
+    .thumb img {
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .thumb .ph {
+      position: absolute;
+      inset: 0;
       display: none;
       align-items: center;
       justify-content: center;
       color: var(--text-muted);
       font-size: 11px;
     }
-    .info { padding: 8px 10px 8px 0; min-width: 0; }
+    .info {
+      padding: 8px 10px 8px 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      justify-content: center;
+    }
     .name {
       font-weight: 600;
       white-space: nowrap;
@@ -117,7 +135,6 @@
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
-      margin-top: 4px;
       color: var(--text-secondary);
       font-size: 11px;
     }
@@ -132,7 +149,6 @@
     .badge.pending { background: rgba(234, 179, 8, 0.15); color: var(--warning); }
     .badge.ok { background: rgba(34, 197, 94, 0.12); color: var(--success); }
     .snippet {
-      margin-top: 6px;
       color: var(--text-secondary);
       font-size: 12px;
       display: -webkit-box;
@@ -140,17 +156,34 @@
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
-    .links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .links { display: flex; flex-wrap: wrap; gap: 6px; }
     .links a, .links button.link {
-      background: none;
-      border: none;
-      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      flex: 0 0 auto;
+      padding: 4px 10px;
+      border: 1px solid rgba(249, 115, 22, 0.35);
+      border-radius: 999px;
+      background: rgba(249, 115, 22, 0.12);
       color: var(--accent);
       font: inherit;
       font-size: 12px;
       font-weight: 600;
+      line-height: 1.2;
+      white-space: nowrap;
       cursor: pointer;
       text-decoration: none;
+    }
+    .links a:hover, .links button.link:hover {
+      background: rgba(249, 115, 22, 0.22);
+    }
+    /* Phone-width hosts: shrink the thumbnail so the creator name and the
+       Instagram button always have room to sit beside it. */
+    @media (max-width: 480px) {
+      .card { grid-template-columns: 84px minmax(0, 1fr); gap: 8px; }
+      .thumb { width: 84px; min-height: 76px; }
+      .info { padding: 8px 8px 8px 0; }
+      .meta { font-size: 10px; }
     }
   </style>
 </head>
@@ -177,6 +210,15 @@
       const div = document.createElement("div");
       div.textContent = text == null ? "" : String(text);
       return div.innerHTML;
+    }
+
+    function creatorName(filename) {
+      const raw = (filename == null ? "" : String(filename)).trim();
+      const name = raw
+        .replace(/\.(mp4|mov|m4v|webm|avi|mkv)$/i, "")
+        .replace(/^video\s+by\s+/i, "")
+        .trim();
+      return name || "Untitled clip";
     }
 
     function formatTime(seconds) {
@@ -261,7 +303,6 @@
           transcript.start_seconds != null ? transcript.start_seconds :
           frame.time_seconds != null ? frame.time_seconds : null;
         const driveHref = driveUrlWithTimestamp(item.drive_url, matchTime);
-        const playHref = item.video_url || driveHref || item.instagram_url || "";
         const score = item.hybrid_score != null ? Number(item.hybrid_score).toFixed(3) : "";
         const status = item.indexing_status || "";
         const pending = status === "pending" || status === "processing";
@@ -272,9 +313,9 @@
         const duration = item.duration_seconds != null
           ? formatTime(item.duration_seconds)
           : "";
+        const creator = creatorName(item.filename);
 
         const links = [];
-        if (playHref) links.push(`<button class="link" data-url="${escapeHtml(playHref)}" type="button">Play</button>`);
         if (item.instagram_url) links.push(`<button class="link" data-url="${escapeHtml(item.instagram_url)}" type="button">Instagram</button>`);
         if (driveHref) links.push(`<button class="link" data-url="${escapeHtml(driveHref)}" type="button">Drive</button>`);
 
@@ -287,7 +328,8 @@
                 : `<div class="ph" style="display:flex">No preview</div>`}
             </div>
             <div class="info">
-              <div class="name" title="${escapeHtml(item.filename || "")}">${escapeHtml(item.filename || "Untitled clip")}</div>
+              <div class="name" title="${escapeHtml(creator)}">${escapeHtml(creator)}</div>
+              ${links.length ? `<div class="links">${links.join("")}</div>` : ""}
               <div class="meta">
                 <span class="badge">${escapeHtml(item.file_type || "video")}</span>
                 ${pending ? `<span class="badge pending">${escapeHtml(status)}</span>` : `<span class="badge ok">${escapeHtml(status || "indexed")}</span>`}
@@ -296,7 +338,6 @@
                 ${snippetTime ? `<span>@ ${escapeHtml(snippetTime)}</span>` : ""}
               </div>
               ${snippet ? `<div class="snippet">${snippetTime ? escapeHtml(snippetTime) + " · " : ""}“${escapeHtml(snippet)}”</div>` : ""}
-              <div class="links">${links.join("")}</div>
             </div>
           </article>`;
       }).join("");
