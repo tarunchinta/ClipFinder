@@ -8,7 +8,6 @@ import os
 import subprocess
 import tempfile
 import time
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,14 +15,9 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
-from sqlalchemy import literal_column, select, update
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.database import async_session_maker
-from app.models.indexed_file import IndexedFile, IndexingStatus
-from app.models.video_frame_embedding import VideoFrameEmbedding
+from app.models.indexed_file import IndexingStatus
 from app.observability import (
     emit_video_frame_trace,
     flush_langfuse,
@@ -31,12 +25,22 @@ from app.observability import (
     trace_video_frame,
 )
 from app.services.color_signature import (
-    apply_color_signature,
+    color_signature_values,
     merge_signatures,
     signature_from_image_bytes,
     signature_from_jpeg_path,
 )
-from app.services.transcription import transcribe_video_with_own_session
+from app.services.indexing_store import (
+    get_file,
+    record_frame_failure,
+    set_color_signature,
+    set_thumbnail_embedding,
+    set_vision_embedding,
+    update_file,
+    upsert_frame_embedding,
+)
+from app.services.postgrest import PostgrestClient
+from app.services.transcription import transcribe_and_index_video
 from app.services.vision_embedding import get_vision_embedding_service
 
 logger = logging.getLogger(__name__)
@@ -128,20 +132,20 @@ def _download_video_from_azure_blob_sync(blob_video_url: str) -> bytes | None:
 
 
 async def _download_video_bytes(
-    row: IndexedFile,
+    row: dict,
     google_access_token: str | None,
 ) -> bytes | None:
     """Fetch the source video bytes for a row, dispatching on its ingestion source."""
-    if getattr(row, "source_type", "drive") == "instagram" and row.blob_video_url:
+    if (row.get("source_type") or "drive") == "instagram" and row.get("blob_video_url"):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            functools.partial(_download_video_from_azure_blob_sync, row.blob_video_url),
+            functools.partial(_download_video_from_azure_blob_sync, row["blob_video_url"]),
         )
     if not google_access_token:
-        logger.error("No Google access token for Drive video %s", row.id)
+        logger.error("No Google access token for Drive video %s", row.get("id"))
         return None
-    return await _download_video_from_drive(row.drive_file_id, google_access_token)
+    return await _download_video_from_drive(row.get("drive_file_id"), google_access_token)
 
 
 def _get_video_fps(video_path: str) -> float:
@@ -436,134 +440,48 @@ async def _load_frame_image_bytes(
     return None
 
 
-async def _frame_embedding_exists(
-    session: AsyncSession,
-    video_id: UUID,
-    frame_index: int,
-) -> bool:
-    row = (
-        await session.execute(
-            select(VideoFrameEmbedding.id).where(
-                VideoFrameEmbedding.video_id == video_id,
-                VideoFrameEmbedding.frame_index == frame_index,
-            )
-        )
-    ).scalar_one_or_none()
-    return row is not None
-
-
-async def _upsert_frame_embedding(
-    session: AsyncSession,
-    *,
-    video_id: UUID,
-    frame_index: int,
-    time_seconds: float,
-    embedding: list[float],
-    frame_image_url: str | None,
-) -> bool:
-    """
-    Upsert a frame embedding. Returns True if a new row was inserted (not an update).
-    """
-    stmt = insert(VideoFrameEmbedding).values(
-        id=uuid.uuid4(),
-        video_id=video_id,
-        frame_index=frame_index,
-        time_seconds=time_seconds,
-        embedding=embedding,
-        frame_image_url=frame_image_url,
-    )
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_video_frame_video_id_frame_index",
-        set_={
-            "time_seconds": stmt.excluded.time_seconds,
-            "embedding": stmt.excluded.embedding,
-            "frame_image_url": stmt.excluded.frame_image_url,
-        },
-    ).returning(literal_column("(xmax = 0)").label("inserted"))
-    result = await session.execute(stmt)
-    return bool(result.scalar_one())
-
-
-async def _record_frame_result(
-    session: AsyncSession,
-    video_id: UUID,
-    *,
-    success: bool,
-) -> None:
-    if success:
-        values = {
-            "frames_completed": IndexedFile.frames_completed + 1,
-            "updated_at": datetime.utcnow(),
-        }
-    else:
-        values = {
-            "frames_failed": IndexedFile.frames_failed + 1,
-            "updated_at": datetime.utcnow(),
-        }
-    await session.execute(
-        update(IndexedFile).where(IndexedFile.id == video_id).values(**values)
-    )
-
-
-async def _maybe_mark_video_indexing_complete(
-    session: AsyncSession,
-    video_id: UUID,
-) -> None:
-    row = (
-        await session.execute(select(IndexedFile).where(IndexedFile.id == video_id))
-    ).scalar_one_or_none()
-    if not row or row.frames_total is None:
-        return
-    if row.frames_completed + row.frames_failed < row.frames_total:
-        return
-
-    now = datetime.utcnow()
-    if row.frames_failed >= row.frames_total:
-        row.indexing_status = IndexingStatus.FAILED.value
-        row.error_message = "All frames failed to index"
-    else:
-        row.indexing_status = IndexingStatus.COMPLETED.value
-        row.error_message = None
-        row.indexed_at = now
-    row.updated_at = now
+# The upsert, the frames_completed increment and the "is this video finished"
+# check all happen inside distill_upsert_frame_embedding, so concurrent frames
+# cannot lose a count or race each other to the completion check.
 
 
 async def extract_and_upload_frames(
     video_id: UUID,
     google_access_token: str | None,
-    session: AsyncSession,
+    db: PostgrestClient,
     work_dir: str,
-) -> tuple[list[ExtractedFrame], IndexedFile | None, str | None]:
+) -> tuple[list[ExtractedFrame], dict | None, str | None]:
     """
     Download video from its source (Drive or blob-stored Instagram reel), extract
     frames with ffmpeg, upload JPEGs to storage.
 
     Sets indexing_status=processing and frames_total on the video row.
-    Returns (frames, video_row, error_message).
+    Returns (frames, video_row_dict, error_message).
     """
-    stmt = select(IndexedFile).where(
-        IndexedFile.id == video_id,
-        IndexedFile.file_type == "video",
-    )
-    row = (await session.execute(stmt)).scalar_one_or_none()
+    row = await get_file(db, video_id, file_type="video")
     if not row:
         return [], None, "Video not found or not a video"
 
-    row.indexing_status = IndexingStatus.PROCESSING.value
-    row.frames_total = None
-    row.frames_completed = 0
-    row.frames_failed = 0
-    row.error_message = None
-    row.updated_at = datetime.utcnow()
-    await session.commit()
+    await update_file(
+        db,
+        video_id,
+        indexing_status=IndexingStatus.PROCESSING.value,
+        frames_total=None,
+        frames_completed=0,
+        frames_failed=0,
+        error_message=None,
+    )
 
     video_bytes = await _download_video_bytes(row, google_access_token)
     if not video_bytes:
-        row.indexing_status = IndexingStatus.FAILED.value
-        row.error_message = "Failed to download source video"
-        row.updated_at = datetime.utcnow()
-        await session.commit()
-        return [], row, row.error_message
+        error = "Failed to download source video"
+        await update_file(
+            db,
+            video_id,
+            indexing_status=IndexingStatus.FAILED.value,
+            error_message=error,
+        )
+        return [], row, error
 
     video_path = os.path.join(work_dir, "video")
     with open(video_path, "wb") as f:
@@ -582,11 +500,14 @@ async def extract_and_upload_frames(
         ),
     )
     if not raw_frames:
-        row.indexing_status = IndexingStatus.FAILED.value
-        row.error_message = "No frames extracted (ffmpeg failed or no frames)"
-        row.updated_at = datetime.utcnow()
-        await session.commit()
-        return [], row, row.error_message
+        error = "No frames extracted (ffmpeg failed or no frames)"
+        await update_file(
+            db,
+            video_id,
+            indexing_status=IndexingStatus.FAILED.value,
+            error_message=error,
+        )
+        return [], row, error
 
     settings = get_settings()
     extracted: list[ExtractedFrame] = []
@@ -594,7 +515,7 @@ async def extract_and_upload_frames(
         with open(jpeg_path, "rb") as f:
             image_bytes = f.read()
 
-        blob_path = f"{row.user_id}/{video_id}/frame_{frame_index:05d}.jpg"
+        blob_path = f"{row['user_id']}/{video_id}/frame_{frame_index:05d}.jpg"
         frame_image_url: str | None = None
         if settings.azure_blob_connection_string:
             frame_image_url = await loop.run_in_executor(
@@ -627,6 +548,7 @@ async def extract_and_upload_frames(
             )
         )
 
+    new_thumbnail_url: str | None = None
     if poster_ok:
         with open(poster_path, "rb") as f:
             poster_bytes = f.read()
@@ -637,16 +559,18 @@ async def extract_and_upload_frames(
                 functools.partial(
                     _upload_frame_to_azure_blob,
                     settings.azure_blob_container_name,
-                    thumbnail_blob_path(row.user_id, video_id),
+                    thumbnail_blob_path(UUID(str(row["user_id"])), video_id),
                     poster_bytes,
                 ),
             )
         if poster_url:
-            row.blob_thumbnail_url = poster_url
+            new_thumbnail_url = poster_url
+            row["blob_thumbnail_url"] = poster_url
 
-    row.frames_total = len(extracted)
-    row.updated_at = datetime.utcnow()
-    await session.commit()
+    final_values: dict = {"frames_total": len(extracted)}
+    if new_thumbnail_url:
+        final_values["blob_thumbnail_url"] = new_thumbnail_url
+    await update_file(db, video_id, **final_values)
 
     logger.info(
         "Extracted and uploaded %d frames for video_id=%s",
@@ -656,29 +580,24 @@ async def extract_and_upload_frames(
     return extracted, row, None
 
 
-async def _finalize_frame_index_result(
-    session: AsyncSession,
+async def _finalize_failed_frame(
+    db: PostgrestClient,
     video_id: UUID,
     *,
-    success: bool,
     update_completion: bool,
     frame_index: int | None = None,
 ) -> None:
+    """Count a frame failure. The RPC skips frames that already stored an embedding."""
     if not update_completion:
         return
-    if not success and frame_index is not None:
-        if await _frame_embedding_exists(session, video_id, frame_index):
-            return
-    await _record_frame_result(session, video_id, success=success)
-    await _maybe_mark_video_indexing_complete(session, video_id)
-    await session.commit()
+    await record_frame_failure(db, video_id=video_id, frame_index=frame_index)
 
 
 async def index_single_frame(
     video_id: UUID,
     frame_index: int,
     time_seconds: float,
-    session: AsyncSession,
+    db: PostgrestClient,
     *,
     image_bytes: bytes | None = None,
     local_jpeg_path: str | None = None,
@@ -711,11 +630,9 @@ async def index_single_frame(
                 blob_path=blob_path,
             )
             if not resolved_bytes:
-                await session.rollback()
-                await _finalize_frame_index_result(
-                    session,
+                await _finalize_failed_frame(
+                    db,
                     video_id,
-                    success=False,
                     update_completion=update_completion,
                     frame_index=frame_index,
                 )
@@ -724,30 +641,24 @@ async def index_single_frame(
             vision = get_vision_embedding_service()
             embedding = await vision.generate_embedding_from_image_bytes(resolved_bytes)
             if not embedding:
-                await session.rollback()
-                await _finalize_frame_index_result(
-                    session,
+                await _finalize_failed_frame(
+                    db,
                     video_id,
-                    success=False,
                     update_completion=update_completion,
                     frame_index=frame_index,
                 )
                 return False
 
-            inserted = await _upsert_frame_embedding(
-                session,
+            # Upsert, progress increment and completion check are one statement.
+            await upsert_frame_embedding(
+                db,
                 video_id=video_id,
                 frame_index=frame_index,
                 time_seconds=time_seconds,
                 embedding=embedding,
                 frame_image_url=frame_image_url,
+                count_completion=update_completion,
             )
-
-            if update_completion and inserted:
-                await _record_frame_result(session, video_id, success=True)
-                await _maybe_mark_video_indexing_complete(session, video_id)
-
-            await session.commit()
             success = True
             logger.info(
                 "Indexed frame video_id=%s frame_index=%s embedding_len=%s",
@@ -762,17 +673,19 @@ async def index_single_frame(
                 frame_index,
                 e,
             )
-            await session.rollback()
             try:
-                await _finalize_frame_index_result(
-                    session,
+                await _finalize_failed_frame(
+                    db,
                     video_id,
-                    success=False,
                     update_completion=update_completion,
                     frame_index=frame_index,
                 )
             except Exception:
-                await session.rollback()
+                logger.exception(
+                    "Could not record frame failure for video_id=%s frame_index=%s",
+                    video_id,
+                    frame_index,
+                )
             return False
         finally:
             frame_duration_ms = (time.perf_counter() - frame_start) * 1000
@@ -784,7 +697,7 @@ async def index_single_frame(
 async def index_image_thumbnail(
     file_id: UUID,
     google_access_token: str,
-    session: AsyncSession,
+    db: PostgrestClient,
     trace_id: str | None = None,
     parent_span_id: str | None = None,
 ) -> dict:
@@ -794,18 +707,14 @@ async def index_image_thumbnail(
     Intended for image-index queue workers; callable directly for in-process use.
     """
     result = {"success": False, "error": None}
-    stmt = select(IndexedFile).where(
-        IndexedFile.id == file_id,
-        IndexedFile.file_type == "image",
-    )
-    row = (await session.execute(stmt)).scalar_one_or_none()
+    row = await get_file(db, file_id, file_type="image")
     if not row:
         result["error"] = "Image not found or not an image"
         return result
 
     file_meta = {
         "file_id": str(file_id),
-        "filename": row.filename,
+        "filename": row["filename"],
     }
     if trace_id:
         file_meta["trace_id"] = trace_id
@@ -813,74 +722,90 @@ async def index_image_thumbnail(
         file_meta["parent_span_id"] = parent_span_id
 
     with trace_index_file("image", metadata=file_meta):
-        if not row.thumbnail_url:
+        if not row.get("thumbnail_url"):
             result["error"] = "No thumbnail URL on file record"
-            row.vision_indexing_status = IndexingStatus.FAILED.value
-            row.error_message = result["error"]
-            row.updated_at = datetime.utcnow()
-            await session.commit()
+            await update_file(
+                db,
+                file_id,
+                vision_indexing_status=IndexingStatus.FAILED.value,
+                error_message=result["error"],
+            )
             return result
 
         vision = get_vision_embedding_service()
 
-        row.vision_indexing_status = IndexingStatus.PROCESSING.value
-        row.updated_at = datetime.utcnow()
-        await session.commit()
+        await update_file(
+            db,
+            file_id,
+            vision_indexing_status=IndexingStatus.PROCESSING.value,
+        )
 
-        actual_url = row.thumbnail_url
-        if row.drive_file_id and google_access_token:
+        actual_url = row["thumbnail_url"]
+        if row.get("drive_file_id") and google_access_token:
             fresh_url = await vision._get_fresh_thumbnail_url(
-                row.drive_file_id, google_access_token
+                row["drive_file_id"], google_access_token
             )
             if fresh_url:
                 actual_url = fresh_url
 
         image_bytes = await vision._download_image(actual_url, google_access_token)
         if not image_bytes:
-            row.vision_indexing_status = IndexingStatus.FAILED.value
-            row.error_message = "Failed to download thumbnail"
-            row.updated_at = datetime.utcnow()
-            await session.commit()
-            result["error"] = row.error_message
+            result["error"] = "Failed to download thumbnail"
+            await update_file(
+                db,
+                file_id,
+                vision_indexing_status=IndexingStatus.FAILED.value,
+                error_message=result["error"],
+            )
             return result
 
         sig = signature_from_image_bytes(image_bytes)
         if sig:
-            apply_color_signature(row, sig)
+            values = color_signature_values(sig)
+            await set_color_signature(
+                db,
+                file_id=file_id,
+                histogram=values["histogram"],
+                palette=values["palette"],
+                mean_l=values["mean_l"],
+                std_l=values["std_l"],
+                mean_a=values["mean_a"],
+                mean_b=values["mean_b"],
+            )
 
         if not vision.is_configured:
-            now = datetime.utcnow()
-            row.vision_indexing_status = None
-            row.updated_at = now
-            await session.commit()
+            await update_file(db, file_id, vision_indexing_status=None)
             result["success"] = True
             return result
 
         embedding = await vision.generate_embedding_from_image_bytes(image_bytes)
         if not embedding:
-            row.vision_indexing_status = IndexingStatus.FAILED.value
-            row.error_message = "Failed to generate vision embedding"
-            row.updated_at = datetime.utcnow()
-            await session.commit()
-            result["error"] = row.error_message
+            result["error"] = "Failed to generate vision embedding"
+            await update_file(
+                db,
+                file_id,
+                vision_indexing_status=IndexingStatus.FAILED.value,
+                error_message=result["error"],
+            )
             return result
 
-        now = datetime.utcnow()
-        row.vision_embedding = embedding
-        row.vision_indexing_status = IndexingStatus.COMPLETED.value
-        row.vision_indexed_at = now
-        row.error_message = None
-        row.updated_at = now
-        await session.commit()
+        await set_vision_embedding(
+            db,
+            file_id=file_id,
+            embedding=embedding,
+            status=IndexingStatus.COMPLETED.value,
+            indexed_at=datetime.utcnow(),
+        )
         result["success"] = True
         return result
 
 
-async def _embed_thumbnail_with_own_session(
+async def _embed_thumbnail(
+    db: PostgrestClient,
     video_id: UUID,
     local_jpeg_path: str,
 ) -> bool:
-    """Generate thumbnail_embedding from a local poster JPEG in a dedicated session."""
+    """Generate thumbnail_embedding from a local poster JPEG."""
     if not os.path.isfile(local_jpeg_path):
         return False
     vision = get_vision_embedding_service()
@@ -896,15 +821,7 @@ async def _embed_thumbnail_with_own_session(
     if not embedding:
         logger.warning("Thumbnail embedding failed for video_id=%s", video_id)
         return False
-    async with async_session_maker() as session:
-        row = (
-            await session.execute(select(IndexedFile).where(IndexedFile.id == video_id))
-        ).scalar_one_or_none()
-        if not row:
-            return False
-        row.thumbnail_embedding = embedding
-        row.updated_at = datetime.utcnow()
-        await session.commit()
+    await set_thumbnail_embedding(db, video_id=video_id, embedding=embedding)
     return True
 
 
@@ -919,7 +836,8 @@ def _signatures_from_jpeg_paths(jpeg_paths: list[str]):
     return merge_signatures(sigs)
 
 
-async def _write_color_signature_with_own_session(
+async def _write_color_signature(
+    db: PostgrestClient,
     video_id: UUID,
     jpeg_paths: list[str],
 ) -> bool:
@@ -932,19 +850,22 @@ async def _write_color_signature_with_own_session(
     if not merged:
         logger.warning("Color signature extract produced nothing for video_id=%s", video_id)
         return False
-    async with async_session_maker() as session:
-        row = (
-            await session.execute(select(IndexedFile).where(IndexedFile.id == video_id))
-        ).scalar_one_or_none()
-        if not row:
-            return False
-        apply_color_signature(row, merged)
-        row.updated_at = datetime.utcnow()
-        await session.commit()
+    values = color_signature_values(merged)
+    await set_color_signature(
+        db,
+        file_id=video_id,
+        histogram=values["histogram"],
+        palette=values["palette"],
+        mean_l=values["mean_l"],
+        std_l=values["std_l"],
+        mean_a=values["mean_a"],
+        mean_b=values["mean_b"],
+    )
     return True
 
 
-async def _index_frame_with_own_session(
+async def _index_frame(
+    db: PostgrestClient,
     video_id: UUID,
     frame: ExtractedFrame,
     *,
@@ -952,25 +873,30 @@ async def _index_frame_with_own_session(
     trace_ctx: dict | None,
     semaphore: asyncio.Semaphore,
 ) -> bool:
+    """Embed and store one frame.
+
+    The semaphore still bounds how many frames are embedded at once (that is the
+    expensive Gemini call), but every frame now shares the one PostgREST client
+    instead of opening its own Postgres session.
+    """
     async with semaphore:
-        async with async_session_maker() as frame_session:
-            return await index_single_frame(
-                video_id,
-                frame.frame_index,
-                frame.time_seconds,
-                frame_session,
-                local_jpeg_path=frame.local_jpeg_path,
-                blob_path=frame.blob_path,
-                frame_image_url=frame.frame_image_url,
-                filename=filename,
-                trace_ctx=trace_ctx,
-            )
+        return await index_single_frame(
+            video_id,
+            frame.frame_index,
+            frame.time_seconds,
+            db,
+            local_jpeg_path=frame.local_jpeg_path,
+            blob_path=frame.blob_path,
+            frame_image_url=frame.frame_image_url,
+            filename=filename,
+            trace_ctx=trace_ctx,
+        )
 
 
 async def run_frame_indexing_for_video(
     video_id: UUID,
     google_access_token: str | None,
-    session: AsyncSession,
+    db: PostgrestClient,
     trace_id: str | None = None,
     parent_span_id: str | None = None,
 ) -> dict:
@@ -1004,7 +930,7 @@ async def run_frame_indexing_for_video(
         frames, row, extract_error = await extract_and_upload_frames(
             video_id=video_id,
             google_access_token=google_access_token,
-            session=session,
+            db=db,
             work_dir=tmpdir,
         )
         if extract_error or not row:
@@ -1026,14 +952,16 @@ async def run_frame_indexing_for_video(
 
         # Transcribe audio concurrently with frame embedding (video file lives in tmpdir)
         transcription_task = asyncio.create_task(
-            transcribe_video_with_own_session(
+            transcribe_and_index_video(
                 video_id,
                 os.path.join(tmpdir, "video"),
-                filename=row.filename,
+                db,
+                filename=row["filename"],
             )
         )
         thumbnail_task = asyncio.create_task(
-            _embed_thumbnail_with_own_session(
+            _embed_thumbnail(
+                db,
                 video_id,
                 os.path.join(tmpdir, "thumbnail.jpg"),
             )
@@ -1043,15 +971,16 @@ async def run_frame_indexing_for_video(
         if os.path.isfile(poster_path):
             jpeg_paths.append(poster_path)
         color_task = asyncio.create_task(
-            _write_color_signature_with_own_session(video_id, jpeg_paths)
+            _write_color_signature(db, video_id, jpeg_paths)
         )
 
         outcomes = await asyncio.gather(
             *[
-                _index_frame_with_own_session(
+                _index_frame(
+                    db,
                     video_id,
                     frame,
-                    filename=row.filename,
+                    filename=row["filename"],
                     trace_ctx=trace_ctx,
                     semaphore=semaphore,
                 )
