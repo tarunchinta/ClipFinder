@@ -1,4 +1,4 @@
-# ClipFinder MVP - Backend Application
+# Distill MVP - Backend Application
 
 
 

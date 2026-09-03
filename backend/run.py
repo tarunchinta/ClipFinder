@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Development server runner for ClipFinder MVP.
+Development server runner for Distill MVP.
 
 Usage:
     python run.py

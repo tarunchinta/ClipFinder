@@ -1,4 +1,4 @@
-"""Resolve the ClipFinder user for MCP tools and HTTP reel ingest."""
+"""Resolve the Distill user for MCP tools and HTTP reel ingest."""
 
 from fastapi import Depends, HTTPException
 from sqlalchemy import select
@@ -11,7 +11,7 @@ from app.models.user import User
 
 
 async def get_bound_user(session: AsyncSession) -> User:
-    """Resolve the ClipFinder user from the MCP OAuth access token (sub claim)."""
+    """Resolve the Distill user from the MCP OAuth access token (sub claim)."""
     user_id = mcp_user_id.get()
     if user_id is None:
         raise ValueError("No MCP user identity in request context")
@@ -19,7 +19,7 @@ async def get_bound_user(session: AsyncSession) -> User:
         await session.execute(select(User).where(User.id == user_id))
     ).unique().scalar_one_or_none()
     if not user:
-        raise ValueError(f"MCP token user id '{user_id}' does not match any ClipFinder user")
+        raise ValueError(f"MCP token user id '{user_id}' does not match any Distill user")
     return user
 
 
@@ -36,6 +36,6 @@ async def get_ingest_user(
     if not user:
         raise HTTPException(
             status_code=503,
-            detail=f"MCP_USER_EMAIL '{email}' does not match any ClipFinder user",
+            detail=f"MCP_USER_EMAIL '{email}' does not match any Distill user",
         )
     return user

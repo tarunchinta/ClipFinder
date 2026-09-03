@@ -1,4 +1,4 @@
-# ClipFinder
+# Distill
 
 **Semantic search for video clips and images. Find a shot in seconds instead of scrubbing through hours of footage.**
 
@@ -13,19 +13,19 @@
 
 Content creators accumulate thousands of clips and images, usually in Google Drive. Drive search can't see what's inside a video or image so finding "the shot of a red scooter pulling away at night" means scrubbing through folders by hand.
 
-ClipFinder makes a media library searchable by content. Point it at a Drive folder; it indexes every image and video frame, and a plain-text query like `red car` returns the matching files and frame timestamps.
+Distill makes a media library searchable by content. Point it at a Drive folder; it indexes every image and video frame, and a plain-text query like `red car` returns the matching files and frame timestamps.
 
 ## Demo
 
-<video src="https://github.com/tarunchinta/ClipFinder/raw/main/clipfinder-demo.mp4" controls width="100%"></video>
+<video src="https://github.com/tarunchinta/ClipFinder/raw/main/distill-demo.mp4" controls width="100%"></video>
 
-> If the player above doesn't load, [watch the demo here](https://github.com/tarunchinta/ClipFinder/raw/main/clipfinder-demo.mp4).
+> If the player above doesn't load, [watch the demo here](https://github.com/tarunchinta/ClipFinder/raw/main/distill-demo.mp4).
 
 ---
 
 ## How It Works
 
-ClipFinder is a single **FastAPI** service. After a user signs in with Google (read-only Drive scope) and picks a folder, indexing and search run through one pipeline:
+Distill is a single **FastAPI** service. After a user signs in with Google (read-only Drive scope) and picks a folder, indexing and search run through one pipeline:
 
 ```
                           ┌──────────────────────────────────────────────┐
@@ -142,7 +142,7 @@ The shipped search path is **hybrid**: four retrieval legs are fused with **Reci
 
 ```bash
 git clone <your-repo-url>
-cd ClipFinder-MVP/backend
+cd Distill/backend
 
 python -m venv venv
 # Windows: .\venv\Scripts\activate

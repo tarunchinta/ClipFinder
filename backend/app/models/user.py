@@ -35,7 +35,7 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
         "OAuthAccount", lazy="joined"
     )
     
-    # Additional fields for ClipFinder
+    # Additional fields for Distill
     display_name: Mapped[str] = mapped_column(String(255), nullable=True)
     avatar_url: Mapped[str] = mapped_column(String(500), nullable=True)
     

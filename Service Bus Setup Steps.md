@@ -1,4 +1,4 @@
-# Azure Service Bus Setup — ClipFinder
+# Azure Service Bus Setup — Distill
 
 This guide covers everything needed for indexing to work end-to-end after the Service Bus-ready code changes. Steps are ranked by priority: **P0** blocks all indexing, **P1** blocks job processing, **P2** is production hardening, **P3** is verification.
 

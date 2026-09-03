@@ -1,4 +1,4 @@
-"""MCP server with ClipFinder tools: reel ingest, hybrid search, transcripts."""
+"""MCP server with Distill tools: reel ingest, hybrid search, transcripts."""
 
 import logging
 from pathlib import Path
@@ -22,7 +22,7 @@ from app.services.video_frame_indexing import get_blob_url_with_sas
 
 logger = logging.getLogger(__name__)
 
-SEARCH_UI_URI = "ui://clipfinder/search"
+SEARCH_UI_URI = "ui://distill/search"
 SEARCH_APP_HTML_PATH = Path(__file__).parent / "views" / "search_app.html"
 
 apps = Apps()
@@ -147,17 +147,17 @@ async def search_clips(query: str, limit: int = 10) -> dict[str, Any]:
 apps.add_html_resource(
     SEARCH_UI_URI,
     SEARCH_APP_HTML_PATH.read_text(encoding="utf-8"),
-    name="ClipFinder Search",
-    title="ClipFinder Search",
+    name="Distill Search",
+    title="Distill Search",
     description="Interactive scrollable search results with an inline query box",
     csp=_search_ui_csp(),
     prefers_border=True,
 )
 
 mcp = MCPServer(
-    "clipfinder",
+    "distill",
     instructions=(
-        "Index Instagram reels into ClipFinder and search them. Indexing is "
+        "Index Instagram reels into Distill and search them. Indexing is "
         "asynchronous: after ingest_instagram_reel returns, poll get_transcript "
         "(transcript_status) or search_clips (indexing_status) for completion."
     ),

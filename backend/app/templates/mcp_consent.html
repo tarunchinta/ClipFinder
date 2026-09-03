@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ClipFinder — Connect to Claude</title>
+    <title>Distill — Connect to Claude</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -49,7 +49,7 @@
 </head>
 <body>
     <div class="card">
-        <h1>ClipFinder MCP</h1>
+        <h1>Distill MCP</h1>
         {% if error %}
             <p class="error">{{ error }}</p>
         {% else %}
@@ -57,7 +57,7 @@
                 <p>Signed in as <span class="email">{{ user_email }}</span></p>
             {% endif %}
             <p>
-                Claude is requesting access to your ClipFinder clip library:
+                Claude is requesting access to your Distill clip library:
                 ingesting Instagram reels, searching clips, and reading transcripts.
             </p>
             <div class="actions">

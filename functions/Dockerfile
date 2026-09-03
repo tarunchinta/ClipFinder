@@ -1,4 +1,4 @@
-# ClipFinder Azure Functions - Service Bus indexing consumers
+# Distill Azure Functions - Service Bus indexing consumers
 FROM mcr.microsoft.com/azure-functions/python:4-python3.11
 
 ENV AzureWebJobsScriptRoot=/home/site/wwwroot \

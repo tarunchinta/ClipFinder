@@ -1,1 +1,1 @@
-"""Remote MCP server exposing ClipFinder ingest/search/transcript tools."""
+"""Remote MCP server exposing Distill ingest/search/transcript tools."""

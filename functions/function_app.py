@@ -1,4 +1,4 @@
-"""Azure Functions Service Bus consumers for ClipFinder indexing jobs."""
+"""Azure Functions Service Bus consumers for Distill indexing jobs."""
 
 import asyncio
 import json
