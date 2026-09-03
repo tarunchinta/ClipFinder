@@ -1,5 +1,5 @@
 """
-Search relevance eval for ClipFinder hybrid search.
+Search relevance eval for Distill hybrid search.
 
 Runs a fixed set of queries against IndexingService.hybrid_search_rrf for a
 dev account with pre-existing indexed files, compares the ranked results to

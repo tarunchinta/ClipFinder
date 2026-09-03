@@ -58,14 +58,27 @@ class ColorSignature:
     mean_b: float
 
 
+def color_signature_values(sig: ColorSignature) -> dict:
+    """Signature as plain column values, for the PostgREST worker path."""
+    return {
+        "histogram": [float(x) for x in sig.histogram],
+        "palette": sig.palette,
+        "mean_l": float(sig.mean_l),
+        "std_l": float(sig.std_l),
+        "mean_a": float(sig.mean_a),
+        "mean_b": float(sig.mean_b),
+    }
+
+
 def apply_color_signature(row, sig: ColorSignature) -> None:
     """Write signature columns onto an IndexedFile-like ORM row."""
-    row.color_histogram = [float(x) for x in sig.histogram]
-    row.color_palette = sig.palette
-    row.color_mean_l = float(sig.mean_l)
-    row.color_std_l = float(sig.std_l)
-    row.color_mean_a = float(sig.mean_a)
-    row.color_mean_b = float(sig.mean_b)
+    values = color_signature_values(sig)
+    row.color_histogram = values["histogram"]
+    row.color_palette = values["palette"]
+    row.color_mean_l = values["mean_l"]
+    row.color_std_l = values["std_l"]
+    row.color_mean_a = values["mean_a"]
+    row.color_mean_b = values["mean_b"]
 
 
 def signature_from_row(row) -> Optional[ColorSignature]:

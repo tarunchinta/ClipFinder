@@ -164,6 +164,41 @@ class Settings(BaseSettings):
 
     supabase_storage_bucket: str = "video-frames"  # bucket name for frame images
 
+    # PostgREST (Supabase REST API) - the indexing workers' data path.
+    # service_role bypasses RLS; fall back to supabase_key for local setups.
+    supabase_service_role_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "SUPABASE_SERVICE_KEY",
+        ),
+    )
+
+    # Max simultaneous HTTP connections to PostgREST per worker. 1 means a single
+    # queue-trigger invocation holds exactly one connection no matter how many
+    # frames it indexes in parallel.
+    postgrest_max_connections: int = Field(
+        default=1,
+        validation_alias="POSTGREST_MAX_CONNECTIONS",
+    )
+
+    postgrest_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias="POSTGREST_TIMEOUT_SECONDS",
+    )
+
+    @property
+    def postgrest_url(self) -> str:
+        """Base URL of the PostgREST endpoint (Supabase project URL + /rest/v1)."""
+        if not self.supabase_url:
+            return ""
+        return f"{self.supabase_url.rstrip('/')}/rest/v1"
+
+    @property
+    def postgrest_key(self) -> str:
+        """Key PostgREST authenticates with; service_role preferred."""
+        return self.supabase_service_role_key or self.supabase_key
+
 
 
     # Azure Blob Storage (for video frame thumbnails; preferred when set)

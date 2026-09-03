@@ -276,7 +276,7 @@ async def upsert_user_from_workos(
     session: AsyncSession,
     workos_user: Any,
 ) -> User:
-    """Find or create a ClipFinder User from a WorkOS AuthKit profile."""
+    """Find or create a Distill User from a WorkOS AuthKit profile."""
     profile = _workos_user_to_dict(workos_user)
     email = profile.get("email")
     if not email:
@@ -314,11 +314,11 @@ async def upsert_user_from_workos(
     session.add(user)
     await session.commit()
     await session.refresh(user)
-    logger.info("Created ClipFinder user from WorkOS AuthKit: %s", email)
+    logger.info("Created Distill user from WorkOS AuthKit: %s", email)
     return user
 
 
-async def resolve_clipfinder_user(
+async def resolve_distill_user(
     session: AsyncSession,
     workos_user: Any,
 ) -> User:

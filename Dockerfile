@@ -1,4 +1,4 @@
-# ClipFinder MVP - Dockerfile
+# Distill MVP - Dockerfile
 # Single-stage Python image for FastAPI backend
 
 FROM python:3.11-slim

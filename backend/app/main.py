@@ -1,5 +1,5 @@
 """
-ClipFinder MVP - FastAPI Application
+Distill MVP - FastAPI Application
 
 Semantic video clip search for creators.
 """
@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     
     Creates database tables on startup.
     """
-    logger.info("Starting ClipFinder API...")
+    logger.info("Starting Distill API...")
     
     # Create database tables
     await create_db_and_tables()
@@ -62,12 +62,12 @@ async def lifespan(app: FastAPI):
     async with mcp.session_manager.run():
         yield
 
-    logger.info("Shutting down ClipFinder API...")
+    logger.info("Shutting down Distill API...")
 
 
 # Create FastAPI application
 app = FastAPI(
-    title="ClipFinder API",
+    title="Distill API",
     description="Semantic video clip search for creators",
     version="0.1.0",
     lifespan=lifespan,
@@ -130,7 +130,7 @@ async def health_check():
 async def api_info():
     """API information endpoint."""
     return {
-        "name": "ClipFinder API",
+        "name": "Distill API",
         "version": "0.1.0",
         "description": "Semantic video clip search for creators",
         "docs": "/docs",

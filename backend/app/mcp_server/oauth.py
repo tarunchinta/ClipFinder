@@ -3,7 +3,7 @@
 Claude runs authorization-code + PKCE against these endpoints. The human signs
 in via WorkOS AuthKit (Google social login); a successful login auto-approves
 the MCP connection (no separate consent screen). MCP access tokens carry the
-ClipFinder user id in `sub` so tools scope search to that account.
+Distill user id in `sub` so tools scope search to that account.
 """
 
 import base64
@@ -33,7 +33,7 @@ from app.mcp_server.workos_auth import (
     get_workos_user_from_request,
     get_workos_client,
     pending_oauth_query,
-    resolve_clipfinder_user,
+    resolve_distill_user,
     seal_auth_response,
     set_pending_oauth_cookie,
     set_wos_session_cookie,
@@ -299,14 +299,14 @@ async def _auto_approve_redirect(
     sealed_session: str | None = None,
 ) -> RedirectResponse:
     """Issue an authorization code and redirect back to the MCP client."""
-    clipfinder_user = await resolve_clipfinder_user(session, workos_user)
+    distill_user = await resolve_distill_user(session, workos_user)
     auth_code = _sign(
         {
             "token_use": "mcp_code",
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "code_challenge": code_challenge,
-            "sub": str(clipfinder_user.id),
+            "sub": str(distill_user.id),
         },
         aud=CODE_AUD,
         lifetime_seconds=CODE_LIFETIME_SECONDS,
@@ -320,7 +320,7 @@ async def _auto_approve_redirect(
     if sealed_session:
         set_wos_session_cookie(response, sealed_session)
     clear_pending_oauth_cookie(response)
-    logger.info("MCP OAuth: auto-approved for user %s", clipfinder_user.id)
+    logger.info("MCP OAuth: auto-approved for user %s", distill_user.id)
     return response
 
 

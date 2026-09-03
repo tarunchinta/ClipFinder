@@ -3,22 +3,35 @@
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import select
-
 from app.celery_app import celery_app
-from app.database import async_session_maker
-from app.models.indexed_file import IndexedFile
-from app.models.user import User
-from app.services.google_auth import get_valid_access_token
+from app.services.google_auth import get_valid_access_token_via_postgrest
+from app.services.indexing_store import get_file, get_user
+from app.services.postgrest import postgrest_session
 from app.services.video_frame_indexing import (
     index_image_thumbnail,
     run_frame_indexing_for_video,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    """PostgREST returns timestamps as ISO strings; token expiry compares datetimes."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning("Could not parse timestamp %r", value)
+        return None
+    # google_token_expires_at is a naive UTC column; normalise so comparisons work.
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
@@ -47,29 +60,29 @@ async def _run_frame_indexing_async(
     _debug_log("tasks.py:_run_frame_indexing_async", "Task started", {"video_id": video_id}, "H4")
     # #endregion
     video_uuid = UUID(video_id)
-    async with async_session_maker() as session:
-        stmt = select(IndexedFile).where(IndexedFile.id == video_uuid)
-        indexed_file = (await session.execute(stmt)).scalar_one_or_none()
-        if not indexed_file or indexed_file.file_type != "video":
+    # One pooled PostgREST connection for the whole job: the frame, thumbnail,
+    # colour and transcript coroutines below all share this client.
+    async with postgrest_session() as db:
+        indexed_file = await get_file(db, video_uuid, file_type="video")
+        if not indexed_file:
             # #region agent log
-            _debug_log("tasks.py:_run_frame_indexing_async", "Video not found or not video", {"video_id": video_id, "found": indexed_file is not None, "file_type": getattr(indexed_file, "file_type", None)}, "H5")
+            _debug_log("tasks.py:_run_frame_indexing_async", "Video not found or not video", {"video_id": video_id, "found": False, "file_type": None}, "H5")
             # #endregion
             return {"error": "Video not found or not a video"}
 
-        user_stmt = select(User).where(User.id == indexed_file.user_id)
-        user = (await session.execute(user_stmt)).unique().scalar_one_or_none()
+        user = await get_user(db, UUID(str(indexed_file["user_id"])))
         if not user:
             return {"error": "User not found"}
 
         # Instagram-sourced videos are downloaded from Azure Blob and need no Google token
         access_token = None
-        if getattr(indexed_file, "source_type", "drive") == "drive":
-            access_token = await get_valid_access_token(
-                user_id=user.id,
-                access_token=user.google_access_token,
-                refresh_token=user.google_refresh_token,
-                expires_at=user.google_token_expires_at,
-                session=session,
+        if (indexed_file.get("source_type") or "drive") == "drive":
+            access_token = await get_valid_access_token_via_postgrest(
+                db,
+                user_id=UUID(str(user["id"])),
+                access_token=user.get("google_access_token"),
+                refresh_token=user.get("google_refresh_token"),
+                expires_at=_parse_timestamp(user.get("google_token_expires_at")),
             )
             if not access_token:
                 # #region agent log
@@ -80,7 +93,7 @@ async def _run_frame_indexing_async(
         out = await run_frame_indexing_for_video(
             video_id=video_uuid,
             google_access_token=access_token,
-            session=session,
+            db=db,
             trace_id=trace_id,
             parent_span_id=parent_span_id,
         )
@@ -97,23 +110,21 @@ async def _run_image_indexing_async(
 ) -> dict:
     """Load image and user, get token, run thumbnail vision indexing."""
     file_uuid = UUID(file_id)
-    async with async_session_maker() as session:
-        stmt = select(IndexedFile).where(IndexedFile.id == file_uuid)
-        indexed_file = (await session.execute(stmt)).scalar_one_or_none()
-        if not indexed_file or indexed_file.file_type != "image":
+    async with postgrest_session() as db:
+        indexed_file = await get_file(db, file_uuid, file_type="image")
+        if not indexed_file:
             return {"error": "Image not found or not an image"}
 
-        user_stmt = select(User).where(User.id == indexed_file.user_id)
-        user = (await session.execute(user_stmt)).unique().scalar_one_or_none()
+        user = await get_user(db, UUID(str(indexed_file["user_id"])))
         if not user:
             return {"error": "User not found"}
 
-        access_token = await get_valid_access_token(
-            user_id=user.id,
-            access_token=user.google_access_token,
-            refresh_token=user.google_refresh_token,
-            expires_at=user.google_token_expires_at,
-            session=session,
+        access_token = await get_valid_access_token_via_postgrest(
+            db,
+            user_id=UUID(str(user["id"])),
+            access_token=user.get("google_access_token"),
+            refresh_token=user.get("google_refresh_token"),
+            expires_at=_parse_timestamp(user.get("google_token_expires_at")),
         )
         if not access_token:
             return {"error": "Could not get valid Google access token"}
@@ -121,7 +132,7 @@ async def _run_image_indexing_async(
         return await index_image_thumbnail(
             file_id=file_uuid,
             google_access_token=access_token,
-            session=session,
+            db=db,
             trace_id=trace_id,
             parent_span_id=parent_span_id,
         )

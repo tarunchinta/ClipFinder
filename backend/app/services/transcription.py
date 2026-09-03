@@ -13,16 +13,16 @@ import os
 import subprocess
 import threading
 from dataclasses import dataclass
-from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.config import get_settings
-from app.database import async_session_maker
-from app.models.indexed_file import IndexedFile, IndexingStatus
-from app.models.video_transcript_segment import VideoTranscriptSegment
+from app.models.indexed_file import IndexingStatus
+from app.services.indexing_store import (
+    replace_transcript_segments,
+    transcript_segment_payload,
+    update_file,
+)
+from app.services.postgrest import PostgrestClient
 from app.services.vision_embedding import get_vision_embedding_service
 
 logger = logging.getLogger(__name__)
@@ -195,22 +195,17 @@ def _transcribe_wav(wav_path: str) -> list[TranscriptSegment]:
 
 
 async def _set_transcript_status(
-    session: AsyncSession,
+    db: PostgrestClient,
     video_id: UUID,
     status: IndexingStatus,
 ) -> None:
-    await session.execute(
-        update(IndexedFile)
-        .where(IndexedFile.id == video_id)
-        .values(transcript_status=status.value, updated_at=datetime.utcnow())
-    )
-    await session.commit()
+    await update_file(db, video_id, transcript_status=status.value)
 
 
 async def transcribe_and_index_video(
     video_id: UUID,
     video_path: str,
-    session: AsyncSession,
+    db: PostgrestClient,
     filename: str | None = None,
 ) -> dict:
     """
@@ -228,7 +223,7 @@ async def transcribe_and_index_video(
         return result
 
     try:
-        await _set_transcript_status(session, video_id, IndexingStatus.PROCESSING)
+        await _set_transcript_status(db, video_id, IndexingStatus.PROCESSING)
         loop = asyncio.get_running_loop()
 
         has_audio = await loop.run_in_executor(
@@ -236,7 +231,7 @@ async def transcribe_and_index_video(
         )
         if not has_audio:
             logger.info("No audio stream in video_id=%s, skipping transcription", video_id)
-            await _set_transcript_status(session, video_id, IndexingStatus.COMPLETED)
+            await _set_transcript_status(db, video_id, IndexingStatus.COMPLETED)
             return result
 
         wav_path = video_path + ".wav"
@@ -245,7 +240,7 @@ async def transcribe_and_index_video(
         )
         if not extracted:
             result["error"] = "Audio extraction failed"
-            await _set_transcript_status(session, video_id, IndexingStatus.FAILED)
+            await _set_transcript_status(db, video_id, IndexingStatus.FAILED)
             return result
 
         segments = await loop.run_in_executor(
@@ -259,14 +254,14 @@ async def transcribe_and_index_video(
             for i, seg in enumerate(segments):
                 embeddings[i] = await vision_service.generate_document_text_embedding(seg.text)
 
-        # Replace existing segments for this video (re-indexing)
-        await session.execute(
-            delete(VideoTranscriptSegment).where(VideoTranscriptSegment.video_id == video_id)
-        )
-        for seg, embedding in zip(segments, embeddings):
-            session.add(
-                VideoTranscriptSegment(
-                    video_id=video_id,
+        # Replace existing segments for this video (re-indexing). The delete and
+        # the insert happen inside one RPC so a half-written transcript is never
+        # visible to search.
+        await replace_transcript_segments(
+            db,
+            video_id=video_id,
+            segments=[
+                transcript_segment_payload(
                     segment_index=seg.segment_index,
                     start_seconds=seg.start_seconds,
                     end_seconds=seg.end_seconds,
@@ -274,10 +269,11 @@ async def transcribe_and_index_video(
                     words=seg.words or None,
                     text_embedding=embedding,
                 )
-            )
-        await session.commit()
+                for seg, embedding in zip(segments, embeddings)
+            ],
+        )
 
-        await _set_transcript_status(session, video_id, IndexingStatus.COMPLETED)
+        await _set_transcript_status(db, video_id, IndexingStatus.COMPLETED)
         result["segments"] = len(segments)
         logger.info(
             "Transcript indexed for video_id=%s filename=%s: %d segment(s)",
@@ -287,25 +283,9 @@ async def transcribe_and_index_video(
         )
     except Exception as e:
         logger.exception("Transcription failed for video_id=%s: %s", video_id, e)
-        await session.rollback()
         result["error"] = str(e)
         try:
-            await _set_transcript_status(session, video_id, IndexingStatus.FAILED)
+            await _set_transcript_status(db, video_id, IndexingStatus.FAILED)
         except Exception:
-            await session.rollback()
+            logger.exception("Could not mark transcript failed for video_id=%s", video_id)
     return result
-
-
-async def transcribe_video_with_own_session(
-    video_id: UUID,
-    video_path: str,
-    filename: str | None = None,
-) -> dict:
-    """Run transcribe_and_index_video with a dedicated DB session (for use alongside frame indexing)."""
-    async with async_session_maker() as session:
-        return await transcribe_and_index_video(
-            video_id,
-            video_path,
-            session,
-            filename=filename,
-        )
