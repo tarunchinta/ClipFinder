@@ -31,7 +31,7 @@ build
 *.mp4
 
 # Local config and secrets
-.env
+**/.env
 *.local
 
 # Documentation (not needed in container)
