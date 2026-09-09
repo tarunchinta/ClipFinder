@@ -1,0 +1,19 @@
+{
+  "twelvelabs_index_id": "6a9d8422cf24a032539d87bc",
+  "twelvelabs_index_name": "distill-benchmark-20260906",
+  "updated_at": "2026-09-06T15:18:59Z",
+  "videos": {
+    "instagram:DX5ktNIOwx7": {
+      "status": "ready",
+      "last_error": null,
+      "distill_file_id": "32a78b8b-121d-4bc3-9f6a-85b33a97c309",
+      "filename": "Video by thepaytonproject.mp4",
+      "duration_seconds": null,
+      "blob_video_url": "https://rgtca8b3.blob.core.windows.net/instagram-videos/63de37a7-720b-4820-8176-2df0a425c685/32a78b8b-121d-4bc3-9f6a-85b33a97c309/source.mp4",
+      "tl_asset_id": "6a9d8425cf24a032539d87bd",
+      "tl_indexed_asset_id": "6a9d842b5c930dcf6c591c2d",
+      "tl_video_id": "6a9d842b5c930dcf6c591c2d",
+      "indexed_at": "2026-09-06T15:18:55Z"
+    }
+  }
+}

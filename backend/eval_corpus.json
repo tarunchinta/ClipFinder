@@ -1,0 +1,9 @@
+{
+  "description": "Benchmark corpus shared with TwelveLabs. Append drive_file_id entries as Distill videos are selected for comparison.",
+  "videos": [
+    {
+      "drive_file_id": "instagram:DX5ktNIOwx7",
+      "notes": "First corpus video for Distill vs TwelveLabs indexing sync."
+    }
+  ]
+}

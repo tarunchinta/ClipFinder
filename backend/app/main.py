@@ -14,7 +14,7 @@ import logging
 from app.config import get_settings
 from app.database import create_db_and_tables
 from app.mcp_server.auth import StaticBearerAuthMiddleware
-from app.mcp_server.oauth import router as mcp_oauth_router
+from app.mcp_server.oauth import McpOAuthCorsMiddleware, router as mcp_oauth_router
 from app.mcp_server.server import mcp, mcp_http_app
 from app.routers import auth_router, pages_router, drive_router, reels_router
 
@@ -92,6 +92,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Outer so discovery / DCR / token get Access-Control-Allow-Origin: * even
+# when the caller is not in the credentialed origin list above.
+app.add_middleware(McpOAuthCorsMiddleware)
 
 
 # Global exception handler

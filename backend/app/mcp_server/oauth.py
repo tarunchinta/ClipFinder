@@ -1,9 +1,11 @@
-"""Minimal OAuth 2.1 authorization server for claude.ai custom connectors.
+"""Minimal OAuth 2.1 authorization server for remote MCP clients.
 
-Claude runs authorization-code + PKCE against these endpoints. The human signs
-in via WorkOS AuthKit (Google social login); a successful login auto-approves
-the MCP connection (no separate consent screen). MCP access tokens carry the
-Distill user id in `sub` so tools scope search to that account.
+MCP clients run authorization-code + PKCE against these endpoints, using
+Dynamic Client Registration (RFC 7591) or Client ID Metadata Documents.
+The human signs in via WorkOS AuthKit (Google social login); a successful
+login auto-approves the MCP connection (no separate consent screen). MCP
+access tokens carry the Distill user id in `sub` so tools scope search to
+that account.
 """
 
 import base64
@@ -24,6 +26,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_async_session
+from app.mcp_server.clients import (
+    CimdError,
+    DcrError,
+    LEGACY_REDIRECT_URIS,
+    fetch_cimd_client,
+    is_allowed_redirect_uri,
+    issue_dcr_client,
+    resolve_oauth_client,
+    verify_client_secret,
+)
 from app.mcp_server.workos_auth import (
     clear_pending_oauth_cookie,
     clear_wos_session_cookie,
@@ -49,11 +61,6 @@ templates = Jinja2Templates(
     directory=str(Path(__file__).parent.parent / "templates")
 )
 
-ALLOWED_REDIRECT_URIS = {
-    "https://claude.ai/api/mcp/auth_callback",
-    "https://oauth.pstmn.io/v1/callback",
-}
-
 ACCESS_TOKEN_AUD = "clipfinder-mcp"
 CODE_AUD = "clipfinder-mcp-code"
 REFRESH_AUD = "clipfinder-mcp-refresh"
@@ -61,11 +68,6 @@ REFRESH_AUD = "clipfinder-mcp-refresh"
 CODE_LIFETIME_SECONDS = 300
 ACCESS_TOKEN_LIFETIME_SECONDS = 24 * 3600
 REFRESH_TOKEN_LIFETIME_SECONDS = 30 * 24 * 3600
-
-
-def _confidential_client() -> bool:
-    settings = get_settings()
-    return bool(settings.mcp_oauth_client_id and settings.mcp_oauth_client_secret)
 
 
 def _client_credentials_misconfigured() -> bool:
@@ -126,30 +128,96 @@ def _token_error(error: str, description: str, status_code: int = 400) -> JSONRe
     )
 
 
+def _registration_error(error: str, description: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={"error": error, "error_description": description},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _oauth_cors_path(path: str) -> bool:
+    return path.startswith("/.well-known/") or path in (
+        "/mcp-oauth/register",
+        "/mcp-oauth/token",
+    )
+
+
+class McpOAuthCorsMiddleware:
+    """Allow any origin on discovery, DCR, and token (no cookies)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not _oauth_cors_path(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+
+        if scope.get("method") == "OPTIONS":
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 204,
+                    "headers": [
+                        (b"access-control-allow-origin", b"*"),
+                        (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
+                        (b"access-control-allow-headers", b"Authorization, Content-Type"),
+                        (b"access-control-max-age", b"86400"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        async def send_with_cors(message):
+            if message["type"] == "http.response.start":
+                headers = [
+                    (k, v)
+                    for k, v in (message.get("headers") or [])
+                    if k.lower()
+                    not in (
+                        b"access-control-allow-origin",
+                        b"access-control-allow-credentials",
+                    )
+                ]
+                headers.append((b"access-control-allow-origin", b"*"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+
 # ---------------------------------------------------------------------------
 # Discovery metadata
 # ---------------------------------------------------------------------------
 
-@router.get("/.well-known/oauth-authorization-server", include_in_schema=False)
-async def authorization_server_metadata():
-    """RFC 8414 authorization server metadata."""
+def _authorization_server_doc() -> dict:
     settings = get_settings()
     base = settings.app_url.rstrip("/")
-    token_auth_methods = (
-        ["client_secret_post", "client_secret_basic"]
-        if _confidential_client()
-        else ["none"]
-    )
     return {
         "issuer": base,
         "authorization_endpoint": f"{base}/mcp-oauth/authorize",
         "token_endpoint": f"{base}/mcp-oauth/token",
+        "registration_endpoint": f"{base}/mcp-oauth/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": token_auth_methods,
+        "token_endpoint_auth_methods_supported": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+        ],
         "scopes_supported": ["clipfinder"],
+        "client_id_metadata_document_supported": True,
     }
+
+
+@router.get("/.well-known/oauth-authorization-server", include_in_schema=False)
+@router.get("/.well-known/openid-configuration", include_in_schema=False)
+async def authorization_server_metadata():
+    """RFC 8414 authorization server metadata (also served as OIDC discovery)."""
+    return _authorization_server_doc()
 
 
 def _protected_resource_doc() -> dict:
@@ -168,6 +236,36 @@ def _protected_resource_doc() -> dict:
 @router.get("/.well-known/oauth-protected-resource/mcp/", include_in_schema=False)
 async def protected_resource_metadata():
     return _protected_resource_doc()
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Client Registration (RFC 7591)
+# ---------------------------------------------------------------------------
+
+@router.post("/mcp-oauth/register", include_in_schema=False)
+async def register_client(request: Request):
+    """RFC 7591 dynamic client registration."""
+    if not _mcp_auth_configured():
+        return _registration_error("invalid_client_metadata", _mcp_misconfigured_message())
+    try:
+        body = await request.json()
+    except Exception:
+        return _registration_error(
+            "invalid_client_metadata", "Request body must be JSON."
+        )
+    if not isinstance(body, dict):
+        return _registration_error(
+            "invalid_client_metadata", "Request body must be a JSON object."
+        )
+    try:
+        registered = issue_dcr_client(body)
+    except DcrError as exc:
+        return _registration_error(exc.error, exc.description)
+    return JSONResponse(
+        status_code=201,
+        content=registered,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -236,12 +334,13 @@ async def workos_callback(
     sealed = seal_auth_response(auth_response)
     pending = get_pending_oauth_params(request)
     if pending:
-        error = _validate_authorize_params(
+        error = await _validate_authorize_params(
             pending.get("client_id", ""),
             pending.get("redirect_uri", ""),
             "code",
             pending.get("code_challenge", ""),
             "S256",
+            fetch_cimd=True,
         )
         if error:
             response = templates.TemplateResponse(
@@ -324,26 +423,50 @@ async def _auto_approve_redirect(
     return response
 
 
-def _validate_authorize_params(
+async def _validate_authorize_params(
     client_id: str,
     redirect_uri: str,
     response_type: str,
     code_challenge: str,
     code_challenge_method: str,
+    *,
+    fetch_cimd: bool,
 ) -> str | None:
-    settings = get_settings()
     if not _mcp_auth_configured():
         return _mcp_misconfigured_message()
-    if _confidential_client() and not secrets.compare_digest(
-        client_id, settings.mcp_oauth_client_id
-    ):
-        return "Unknown client_id."
-    if redirect_uri not in ALLOWED_REDIRECT_URIS:
-        return "redirect_uri is not allowed."
     if response_type != "code":
         return "Only response_type=code is supported."
     if not code_challenge or code_challenge_method != "S256":
         return "PKCE with code_challenge_method=S256 is required."
+
+    # Postman's token helper often sends client_id= and relies on the
+    # allowlisted callback. Treat that the same as an unknown public client.
+    if not client_id:
+        if redirect_uri in LEGACY_REDIRECT_URIS:
+            return None
+        return "client_id is required."
+
+    client = resolve_oauth_client(client_id)
+    if client is None:
+        if redirect_uri in LEGACY_REDIRECT_URIS:
+            return None
+        return "Unknown client_id."
+
+    if client.kind == "cimd":
+        if not is_allowed_redirect_uri(redirect_uri):
+            return "redirect_uri is not allowed."
+        if not fetch_cimd:
+            return None
+        try:
+            fetched = await fetch_cimd_client(client_id)
+        except CimdError as exc:
+            return exc.description
+        if redirect_uri not in fetched.redirect_uris:
+            return "redirect_uri is not allowed."
+        return None
+
+    if redirect_uri not in client.redirect_uris:
+        return "redirect_uri is not allowed."
     return None
 
 
@@ -379,8 +502,15 @@ async def authorize_page(
     code_challenge_method: str = "",
     session: AsyncSession = Depends(get_async_session),
 ):
-    error = _validate_authorize_params(
-        client_id, redirect_uri, response_type, code_challenge, code_challenge_method
+    wos = get_workos_user_from_request(request)
+    authenticated = bool(wos.authenticated and wos.user)
+    error = await _validate_authorize_params(
+        client_id,
+        redirect_uri,
+        response_type,
+        code_challenge,
+        code_challenge_method,
+        fetch_cimd=authenticated,
     )
     if error:
         return templates.TemplateResponse(
@@ -389,8 +519,7 @@ async def authorize_page(
             status_code=400,
         )
 
-    wos = get_workos_user_from_request(request)
-    if not wos.authenticated or not wos.user:
+    if not authenticated:
         params = {
             "client_id": client_id,
             "redirect_uri": redirect_uri,
@@ -427,8 +556,15 @@ async def authorize_approve(
     code_challenge: str = Form(""),
     session: AsyncSession = Depends(get_async_session),
 ):
-    error = _validate_authorize_params(
-        client_id, redirect_uri, "code", code_challenge, "S256"
+    wos = get_workos_user_from_request(request)
+    authenticated = bool(wos.authenticated and wos.user)
+    error = await _validate_authorize_params(
+        client_id,
+        redirect_uri,
+        "code",
+        code_challenge,
+        "S256",
+        fetch_cimd=authenticated,
     )
     if error:
         return templates.TemplateResponse(
@@ -437,8 +573,7 @@ async def authorize_approve(
             status_code=400,
         )
 
-    wos = get_workos_user_from_request(request)
-    if not wos.authenticated or not wos.user:
+    if not authenticated:
         params = {
             "client_id": client_id,
             "redirect_uri": redirect_uri,
@@ -482,14 +617,17 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
     return secrets.compare_digest(computed, code_challenge)
 
 
-def _issue_token_pair(user_id: str) -> dict:
+def _issue_token_pair(user_id: str, client_id: str = "") -> dict:
     access_token = _sign(
         {"token_use": "mcp_access", "sub": user_id},
         aud=ACCESS_TOKEN_AUD,
         lifetime_seconds=ACCESS_TOKEN_LIFETIME_SECONDS,
     )
+    refresh_claims: dict[str, str] = {"token_use": "mcp_refresh", "sub": user_id}
+    if client_id:
+        refresh_claims["client_id"] = client_id
     refresh_token = _sign(
-        {"token_use": "mcp_refresh", "sub": user_id},
+        refresh_claims,
         aud=REFRESH_AUD,
         lifetime_seconds=REFRESH_TOKEN_LIFETIME_SECONDS,
     )
@@ -502,6 +640,18 @@ def _issue_token_pair(user_id: str) -> dict:
     }
 
 
+def _authenticate_token_client(
+    client_id: str, client_secret: str
+) -> JSONResponse | None:
+    """Return an error response if confidential client auth fails."""
+    client = resolve_oauth_client(client_id)
+    if client is None or not client.confidential:
+        return None
+    if not verify_client_secret(client, client_secret):
+        return _token_error("invalid_client", "Client authentication failed", 401)
+    return None
+
+
 @router.post("/mcp-oauth/token", include_in_schema=False)
 async def token_endpoint(
     request: Request,
@@ -512,8 +662,8 @@ async def token_endpoint(
     refresh_token: str = Form(""),
     client_id: str = Form(""),
     client_secret: str = Form(""),
+    resource: str = Form(""),  # RFC 8707; accepted so extra form fields do not 422.
 ):
-    settings = get_settings()
     if not _mcp_auth_configured():
         return _token_error(
             "invalid_client",
@@ -521,24 +671,17 @@ async def token_endpoint(
             401,
         )
 
-    if _confidential_client():
-        basic = _client_secret_from_basic_auth(request)
-        if basic:
-            client_id, client_secret = basic
-        if not (
-            client_id
-            and client_secret
-            and secrets.compare_digest(client_id, settings.mcp_oauth_client_id)
-            and secrets.compare_digest(
-                client_secret, settings.mcp_oauth_client_secret
-            )
-        ):
-            return _token_error("invalid_client", "Client authentication failed", 401)
+    basic = _client_secret_from_basic_auth(request)
+    if basic:
+        client_id, client_secret = basic
 
     if grant_type == "authorization_code":
         claims = _decode(code, aud=CODE_AUD)
         if not claims or claims.get("token_use") != "mcp_code":
             return _token_error("invalid_grant", "Invalid or expired authorization code")
+        code_client_id = claims.get("client_id") or ""
+        if client_id and code_client_id and client_id != code_client_id:
+            return _token_error("invalid_grant", "client_id mismatch")
         if redirect_uri and redirect_uri != claims.get("redirect_uri"):
             return _token_error("invalid_grant", "redirect_uri mismatch")
         if not code_verifier or not _verify_pkce(
@@ -548,9 +691,13 @@ async def token_endpoint(
         user_id = claims.get("sub")
         if not user_id:
             return _token_error("invalid_grant", "Authorization code missing user")
+        effective_client_id = client_id or code_client_id
+        auth_error = _authenticate_token_client(effective_client_id, client_secret)
+        if auth_error:
+            return auth_error
         logger.info("MCP OAuth: issued token pair via authorization_code for %s", user_id)
         return JSONResponse(
-            _issue_token_pair(user_id),
+            _issue_token_pair(user_id, effective_client_id),
             headers={"Cache-Control": "no-store"},
         )
 
@@ -558,12 +705,19 @@ async def token_endpoint(
         claims = _decode(refresh_token, aud=REFRESH_AUD)
         if not claims or claims.get("token_use") != "mcp_refresh":
             return _token_error("invalid_grant", "Invalid or expired refresh token")
+        refresh_client_id = claims.get("client_id") or ""
+        if client_id and refresh_client_id and client_id != refresh_client_id:
+            return _token_error("invalid_grant", "client_id mismatch")
         user_id = claims.get("sub")
         if not user_id:
             return _token_error("invalid_grant", "Refresh token missing user")
+        effective_client_id = client_id or refresh_client_id
+        auth_error = _authenticate_token_client(effective_client_id, client_secret)
+        if auth_error:
+            return auth_error
         logger.info("MCP OAuth: rotated token pair via refresh_token for %s", user_id)
         return JSONResponse(
-            _issue_token_pair(user_id),
+            _issue_token_pair(user_id, effective_client_id),
             headers={"Cache-Control": "no-store"},
         )
 
