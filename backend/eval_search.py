@@ -46,7 +46,7 @@ from sqlalchemy import select
 from app.database import async_session_maker
 from app.models.indexed_file import IndexedFile
 from app.models.user import User
-from app.services.indexing import IndexingService
+from app.services.indexing import HYBRID_SEARCH_LEGS, IndexingService
 from app.services.vision_embedding import get_vision_embedding_service
 
 
@@ -190,7 +190,8 @@ def ndcg_at_k(ranked: list[UUID], gains: dict[UUID, float], k: int) -> float:
 # Per-query execution
 # ---------------------------------------------------------------------------
 
-LEGS = ("text", "thumbnail", "frame", "caption", "transcript", "color")
+# Single source of truth, shared with hybrid_search_rrf and run_eval.py.
+LEGS = HYBRID_SEARCH_LEGS
 
 
 @dataclass
