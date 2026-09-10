@@ -1,7 +1,7 @@
 """Indexing service for managing indexed files in the database."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
 from uuid import UUID
 import logging
 import re
@@ -28,6 +28,21 @@ from app.services.video_frame_indexing import get_blob_url_with_sas
 from app.services.vision_embedding import get_vision_embedding_service
 
 logger = logging.getLogger(__name__)
+
+# Retrieval legs fused by IndexingService.hybrid_search_rrf. These are also the
+# per-leg score keys on each result dict ("<leg>_score").
+HYBRID_SEARCH_LEGS: tuple[str, ...] = (
+    "text",
+    "thumbnail",
+    "frame",
+    "caption",
+    "transcript",
+    "color",
+)
+
+# Legs that need a query embedding; when none are enabled we skip the
+# embedding call entirely.
+_EMBEDDING_LEGS = frozenset({"thumbnail", "frame", "caption", "transcript"})
 
 
 class IndexingService:
@@ -1154,6 +1169,26 @@ class IndexingService:
 
     RRF_K = 60
 
+    @staticmethod
+    def _resolve_legs(legs: Optional[Iterable[str]]) -> frozenset[str]:
+        """
+        Normalize a caller's leg selection into a set of enabled leg names.
+
+        None means every leg. Unknown names raise rather than being silently
+        dropped, so a typo in an eval config fails loudly instead of quietly
+        benchmarking a different configuration.
+        """
+        if legs is None:
+            return frozenset(HYBRID_SEARCH_LEGS)
+        requested = frozenset(legs)
+        unknown = requested - frozenset(HYBRID_SEARCH_LEGS)
+        if unknown:
+            raise ValueError(
+                f"Unknown search leg(s): {sorted(unknown)}. "
+                f"Valid legs: {list(HYBRID_SEARCH_LEGS)}"
+            )
+        return requested
+
     async def hybrid_search_rrf(
         self,
         user_id: UUID,
@@ -1161,6 +1196,7 @@ class IndexingService:
         file_type: Optional[str] = None,
         limit: int = 50,
         rrf_k: int = RRF_K,
+        legs: Optional[Iterable[str]] = None,
     ) -> list[dict]:
         """
         Hybrid search fusing retrieval legs with Reciprocal Rank Fusion:
@@ -1175,79 +1211,103 @@ class IndexingService:
         Each leg contributes 1 / (rrf_k + rank) per file. Thumbnail and frame
         scores are kept separate; vision_score is their sum for older callers.
 
+        Args:
+            legs: Restrict retrieval to these legs (see HYBRID_SEARCH_LEGS).
+                None (default) runs all six. Disabled legs are not queried at
+                all and contribute 0.0 to every result.
+
         Returns dicts ordered by hybrid_score desc.
         """
         if not query or not query.strip():
             return []
+        enabled = self._resolve_legs(legs)
+        if not enabled:
+            return []
         fetch_limit = max(limit * 2, 50)
 
-        filename_results = await self.search_files_with_scores(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-        )
-        caption_lexical_results = await self.description_lexical_search(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-        )
-        transcript_lexical_results = await self.transcript_lexical_search(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-        )
-        color_results = await self.color_search(
-            user_id=user_id,
-            query=query,
-            file_type=file_type,
-            limit=fetch_limit,
-        )
+        filename_results: list[tuple[IndexedFile, float]] = []
+        caption_lexical_results: list[tuple[IndexedFile, float]] = []
+        transcript_lexical_results: list[
+            tuple[IndexedFile, VideoTranscriptSegment, float]
+        ] = []
+        color_results: list[tuple[IndexedFile, float]] = []
 
-        vision_service = get_vision_embedding_service()
+        if "text" in enabled:
+            filename_results = await self.search_files_with_scores(
+                user_id=user_id,
+                query=query,
+                file_type=file_type,
+                limit=fetch_limit,
+            )
+        if "caption" in enabled:
+            caption_lexical_results = await self.description_lexical_search(
+                user_id=user_id,
+                query=query,
+                file_type=file_type,
+                limit=fetch_limit,
+            )
+        if "transcript" in enabled:
+            transcript_lexical_results = await self.transcript_lexical_search(
+                user_id=user_id,
+                query=query,
+                file_type=file_type,
+                limit=fetch_limit,
+            )
+        if "color" in enabled:
+            color_results = await self.color_search(
+                user_id=user_id,
+                query=query,
+                file_type=file_type,
+                limit=fetch_limit,
+            )
+
         query_embedding: Optional[list[float]] = None
-        if vision_service.is_configured:
-            query_embedding = await vision_service.generate_text_embedding(query)
+        if enabled & _EMBEDDING_LEGS:
+            vision_service = get_vision_embedding_service()
+            if vision_service.is_configured:
+                query_embedding = await vision_service.generate_text_embedding(query)
 
         thumbnail_results: list[tuple[IndexedFile, float]] = []
         frame_results: list[tuple[IndexedFile, VideoFrameEmbedding, float]] = []
         caption_semantic_results: list[tuple[IndexedFile, float]] = []
         transcript_semantic_results: list[tuple[IndexedFile, VideoTranscriptSegment, float]] = []
         if query_embedding:
-            thumbnail_results = await self.thumbnail_semantic_search_by_embedding(
-                user_id=user_id,
-                query_embedding=query_embedding,
-                file_type=file_type,
-                limit=fetch_limit,
-            )
-            frame_results = await self._vision_search_video_frames(
-                user_id=user_id,
-                query_embedding=query_embedding,
-                file_type=file_type,
-                limit=fetch_limit,
-            )
-            seen_frame_files: set[UUID] = set()
-            unique_frames: list[tuple[IndexedFile, VideoFrameEmbedding, float]] = []
-            for item in frame_results:
-                if item[0].id in seen_frame_files:
-                    continue
-                seen_frame_files.add(item[0].id)
-                unique_frames.append(item)
-            frame_results = unique_frames
-            caption_semantic_results = await self.description_semantic_search_by_embedding(
-                user_id=user_id,
-                query_embedding=query_embedding,
-                file_type=file_type,
-                limit=fetch_limit,
-            )
-            transcript_semantic_results = await self.transcript_semantic_search_by_embedding(
-                user_id=user_id,
-                query_embedding=query_embedding,
-                file_type=file_type,
-                limit=fetch_limit,
-            )
+            if "thumbnail" in enabled:
+                thumbnail_results = await self.thumbnail_semantic_search_by_embedding(
+                    user_id=user_id,
+                    query_embedding=query_embedding,
+                    file_type=file_type,
+                    limit=fetch_limit,
+                )
+            if "frame" in enabled:
+                frame_results = await self._vision_search_video_frames(
+                    user_id=user_id,
+                    query_embedding=query_embedding,
+                    file_type=file_type,
+                    limit=fetch_limit,
+                )
+                seen_frame_files: set[UUID] = set()
+                unique_frames: list[tuple[IndexedFile, VideoFrameEmbedding, float]] = []
+                for item in frame_results:
+                    if item[0].id in seen_frame_files:
+                        continue
+                    seen_frame_files.add(item[0].id)
+                    unique_frames.append(item)
+                frame_results = unique_frames
+            if "caption" in enabled:
+                caption_semantic_results = await self.description_semantic_search_by_embedding(
+                    user_id=user_id,
+                    query_embedding=query_embedding,
+                    file_type=file_type,
+                    limit=fetch_limit,
+                )
+            if "transcript" in enabled:
+                transcript_semantic_results = await self.transcript_semantic_search_by_embedding(
+                    user_id=user_id,
+                    query_embedding=query_embedding,
+                    file_type=file_type,
+                    limit=fetch_limit,
+                )
 
         files_by_id: dict[UUID, IndexedFile] = {}
         scores: dict[UUID, dict[str, float]] = {}
