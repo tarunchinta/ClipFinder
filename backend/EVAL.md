@@ -6,9 +6,10 @@ Four files, run in order:
 |---|---|
 | `create_twelvelabs_index.py` | Creates the TL index. Writes `twelvelabs_index_id` into the state file. |
 | `sync_twelvelabs_index.py` | Uploads corpus videos (from `eval_corpus.json`) into that index. Records the `drive_file_id` → `tl_video_id` mapping. |
-| `eval_queries.json` | Queries, relevance judgments, and arm configurations. |
+| `eval_queries.json` | Queries, relevance judgments, tags, and arm configurations. |
+| `eval_legs.py` | Maps `tags[]` / `expect_color_leg` onto Distill legs and TL `search_options`. |
 | `run_eval.py` | Runs every arm against every query in parallel and scores both systems. |
-| `eval_search.py` | Pre-existing Distill-only harness with per-leg attribution. Reads the same `eval_queries.json`. |
+| `eval_search.py` | Distill-only harness with per-leg attribution. Reads the same `eval_queries.json`. |
 
 State lives in `eval_tl_sync_state.json`, which `run_eval.py` reads but never writes.
 
@@ -23,22 +24,37 @@ python run_eval.py --user you@example.com --dry-run
 
 `--dry-run` validates config, corpus and judgments without spending API calls.
 
+## Tags select modalities
+
+Each query lists Distill legs in `tags[]`. Color is not a tag: set `expect_color_leg` true to enable Distill's color signature. The mapping (and comments) live in `eval_legs.py`:
+
+| Query field | Distill | TwelveLabs |
+|---|---|---|
+| `text` | filename trigram | (none) |
+| `thumbnail` | poster embedding | `visual` |
+| `frame` | video frame embeddings | `visual` |
+| `caption` | caption lexical + semantic | `audio` |
+| `transcript` | transcript lexical + semantic | `audio` |
+| `expect_color_leg: true` | color signature | (none) |
+
+`run_eval.py` and `eval_search.py` both call `eval_legs.py`, so a tagged query runs the same Distill legs in both harnesses. Unknown tags and `"color"` inside `tags[]` fail at load time.
+
+`--tag thumbnail` still filters to queries that include that Distill-leg name; it does not change which legs fire.
+
+Ablation is a query with a subset of tags (for example only `thumbnail` and `frame`), not a visual-only arm.
+
 ## Arms
 
-An arm is one system under one configuration. Arms sharing a query all run
-concurrently, so a leg sweep costs roughly one query's wall clock rather than
-one per arm.
+An arm is one system to search. The shipped file has two: `distill` and `twelvelabs`. Arms sharing a query run concurrently.
 
 ```json
-{ "name": "distill-visual-only", "system": "distill",
-  "distill": { "legs": ["thumbnail", "frame"] } }
-
-{ "name": "tl-visual", "system": "twelvelabs",
-  "twelvelabs": { "search_options": ["visual"] } }
+{ "name": "distill", "system": "distill" }
+{ "name": "twelvelabs", "system": "twelvelabs" }
 ```
 
-Config resolves in three layers, later winning: `defaults` → arm → per-query
-override. A `null` never overrides.
+Config resolves in three layers, later winning: `defaults` → arm → **query tags / `expect_color_leg`** → per-query `"distill"` / `"twelvelabs"` override. A `null` never overrides.
+
+Empty `tags` plus `expect_color_leg` other than true means "use the arm" (typically every Distill leg / the arm's `search_options`). Non-empty tags replace the arm's Distill `legs` and TL `search_options` for that query.
 
 **Distill legs** (`text`, `thumbnail`, `frame`, `caption`, `transcript`,
 `color`) map to `IndexingService.hybrid_search_rrf`'s RRF legs. Omitting `legs`
@@ -50,8 +66,10 @@ be isolated from each other.
 **TwelveLabs options** pass through to `search.query`: `search_options`,
 `group_by`, `operator`, `transcription_options`, `filter`. `search_options`
 must be a subset of the index's `model_options`, which are fixed at index
-creation — `run_eval.py` checks this up front and fails with the mismatch
-rather than erroring once per query.
+creation — `run_eval.py` checks the union of tag-derived options up front and
+fails with the mismatch rather than erroring once per query. `text` and color
+have no TL analog; a query that only sets those needs an explicit
+`twelvelabs.search_options` override or it is rejected.
 
 ## Judgments
 
@@ -59,8 +77,9 @@ rather than erroring once per query.
 that script's schema and the judgments are authored once:
 
 ```json
-{ "id": "q001", "query": "someone unboxing a package",
-  "file_type": null, "expect_color_leg": false, "tags": ["visual"],
+{ "id": "q001", "query": "someone unboxing a package, warm orange look",
+  "file_type": null, "expect_color_leg": true,
+  "tags": ["text", "thumbnail", "frame", "caption", "transcript"],
   "relevant": [
     { "drive_file_id": "instagram:DX5ktNIOwx7", "gain": 3 },
     { "drive_file_id": "instagram:C8xY1zQrLmN" }
@@ -72,9 +91,12 @@ is optional, defaults to 1.0, and only affects nDCG — use graded gains (3 =
 ideal answer, 1 = acceptable) to make nDCG say something. `run_eval.py` also
 accepts a bare `"drive_file_id"` string as shorthand for gain 1.0.
 
-`k_values`, `defaults`, `arms`, and each query's `id`/`tags` are `run_eval.py`
-additions that `eval_search.py` ignores; `file_type` and `expect_color_leg` are
-`eval_search.py` fields that `run_eval.py` ignores.
+`k_values`, `defaults`, `arms`, and each query's `id` are `run_eval.py`
+additions that `eval_search.py` ignores. `tags` and `expect_color_leg` are
+shared: they select Distill legs in both tools, and `eval_search.py` still
+asserts the color-score contract when `expect_color_leg` is set. `file_type`
+is an `eval_search.py` field that `run_eval.py` only honors via a per-query
+`"distill": { "file_type": ... }` block.
 
 Ground truth is authored by hand. A query with no `relevant` entries produces
 undefined metrics and is excluded from averages rather than scored as zero, and
@@ -89,9 +111,9 @@ returns files. TL hits resolve via the `drive_file_id` written into
 
 ```bash
 python run_eval.py --user you@example.com
-python run_eval.py --user you@example.com --arm distill-full --arm tl-visual
+python run_eval.py --user you@example.com --arm distill --arm twelvelabs
 python run_eval.py --user you@example.com --query-id q001 --verbose
-python run_eval.py --user you@example.com --tag speech --out results.json
+python run_eval.py --user you@example.com --tag transcript --out results.json
 ```
 
 `--out` writes per-query rankings, per-leg score breakdowns for Distill, and
@@ -110,4 +132,4 @@ Exit code is 1 if any search failed.
 - The current index was built with `model_options: ["visual", "audio"]`, so
   `transcription` search is unavailable on it. Benchmarking Distill's
   transcript leg against TL's transcription modality needs a new index and a
-  full re-sync.
+  full re-sync. Distill `transcript` currently maps to TL `audio`.

@@ -48,6 +48,7 @@ from app.models.indexed_file import IndexedFile
 from app.models.user import User
 from app.services.indexing import HYBRID_SEARCH_LEGS, IndexingService
 from app.services.vision_embedding import get_vision_embedding_service
+from eval_legs import distill_legs_for_query, validate_query_tags
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +71,10 @@ class QueryCase:
     relevant: list[Judgment]
     file_type: Optional[str] = None
     notes: str = ""
+    tags: list[str] = field(default_factory=list)
     # None = do not check. False = color_score must be 0 on every hit
-    # (query has no color language). True = the color leg must fire.
+    # (query has no color language). True = enable Distill's color leg and
+    # assert it contributed a score. See eval_legs.py for the tag mapping.
     expect_color_leg: Optional[bool] = None
 
 
@@ -95,6 +98,7 @@ def load_query_set(path: Path) -> QuerySet:
           "file_type": "video",
           "notes": "the two baking reels, the first is the better answer",
           "expect_color_leg": false,
+          "tags": ["text", "thumbnail", "frame", "caption", "transcript"],
           "relevant": [
             {"drive_file_id": "instagram:DAcuKpJyzZq", "gain": 3},
             {"drive_file_id": "instagram:C8xY1zQrLmN"}
@@ -107,8 +111,13 @@ def load_query_set(path: Path) -> QuerySet:
     graded gains (3 = ideal answer, 1 = acceptable) to make nDCG meaningful;
     recall/precision/MRR treat any listed file as relevant either way.
 
-    "expect_color_leg" is optional. false asserts the color RRF leg contributed
-    nothing (content-only query). true asserts it fired. Omit to skip the check.
+    "tags" names Distill hybrid_search_rrf legs; see eval_legs.py for how each
+    maps onto Distill and TwelveLabs. Empty tags plus expect_color_leg other
+    than true leaves every Distill leg enabled (arm/defaults behavior).
+
+    "expect_color_leg" is optional. true enables Distill's color leg and
+    asserts it contributed a score. false asserts the color RRF leg
+    contributed nothing (content-only query). Omit to skip the check.
     """
     raw = json.loads(path.read_text())
     queries = []
@@ -127,12 +136,14 @@ def load_query_set(path: Path) -> QuerySet:
         expect = case.get("expect_color_leg")
         if expect is not None:
             expect = bool(expect)
+        tags = validate_query_tags(case.get("tags") or [])
         queries.append(
             QueryCase(
                 query=case["query"],
                 relevant=judgments,
                 file_type=case.get("file_type"),
                 notes=case.get("notes", ""),
+                tags=tags,
                 expect_color_leg=expect,
             )
         )
@@ -264,6 +275,7 @@ async def run_case(
         file_type=case.file_type,
         limit=limit,
         rrf_k=rrf_k,
+        legs=distill_legs_for_query(case.tags, case.expect_color_leg),
     )
     ranked = [r["file"].id for r in results]
 

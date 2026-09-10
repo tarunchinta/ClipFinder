@@ -1,5 +1,5 @@
 {
-  "description": "Shared query set and relevance judgments. Read by eval_search.py (Distill-only, per-leg attribution) and run_eval.py (Distill vs TwelveLabs arms). queries[] uses eval_search.py's schema; k_values/defaults/arms are additions that eval_search.py ignores.",
+  "description": "Shared query set and relevance judgments. Read by eval_search.py (Distill-only, per-leg attribution) and run_eval.py (Distill vs TwelveLabs). tags[] name Distill legs; expect_color_leg enables Distill color. See eval_legs.py for the Distill/TL mapping.",
   "default_k": 10,
   "k_values": [1, 3, 5, 10],
   "defaults": {
@@ -18,38 +18,22 @@
   },
   "arms": [
     {
-      "name": "distill-full",
+      "name": "distill",
       "system": "distill"
     },
     {
-      "name": "distill-visual-only",
-      "system": "distill",
-      "distill": { "legs": ["thumbnail", "frame"] }
-    },
-    {
-      "name": "distill-speech-only",
-      "system": "distill",
-      "distill": { "legs": ["transcript", "caption"] }
-    },
-    {
-      "name": "tl-visual",
-      "system": "twelvelabs",
-      "twelvelabs": { "search_options": ["visual"] }
-    },
-    {
-      "name": "tl-visual-audio",
-      "system": "twelvelabs",
-      "twelvelabs": { "search_options": ["visual", "audio"] }
+      "name": "twelvelabs",
+      "system": "twelvelabs"
     }
   ],
   "queries": [
     {
       "id": "q001",
-      "query": "REPLACE ME - describe something visible in a corpus video",
+      "query": "REPLACE ME - describe something visible in a corpus video, warm orange look",
       "file_type": null,
-      "notes": "Placeholder. Replace with a real query and real judgments before trusting any numbers.",
-      "expect_color_leg": false,
-      "tags": ["visual"],
+      "notes": "Placeholder. Replace with a real query and real judgments before trusting any numbers. Color word keeps the Distill color encoder from no-op'ing while expect_color_leg is true.",
+      "expect_color_leg": true,
+      "tags": ["text", "thumbnail", "frame", "caption", "transcript"],
       "relevant": [
         { "drive_file_id": "instagram:DX5ktNIOwx7", "gain": 3 }
       ]

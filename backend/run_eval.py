@@ -19,7 +19,7 @@ order".
 Usage:
     cd backend
     python run_eval.py --user you@example.com
-    python run_eval.py --user you@example.com --arm distill-full --arm tl-visual
+    python run_eval.py --user you@example.com --arm distill --arm twelvelabs
     python run_eval.py --user you@example.com --query-id q001 --verbose
     python run_eval.py --user you@example.com --out results.json
     python run_eval.py --user you@example.com --dry-run
@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from app.database import async_session_maker
 from app.services.indexing import HYBRID_SEARCH_LEGS, IndexingService
 from create_twelvelabs_index import get_api_key, load_state
+from eval_legs import distill_legs_for_query, tl_search_options_for_query, validate_query_tags
 from eval_metrics import aggregate, evaluate_query, percentile
 from sync_twelvelabs_index import resolve_user
 
@@ -75,6 +76,7 @@ class EvalQuery:
     relevant: list[str]
     graded: dict[str, float] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
+    expect_color_leg: Optional[bool] = None
     distill: dict[str, Any] = field(default_factory=dict)
     twelvelabs: dict[str, Any] = field(default_factory=dict)
 
@@ -153,13 +155,18 @@ def load_queries(path: Path) -> tuple[list[Arm], list[EvalQuery], list[int]]:
         if not text:
             raise ValueError(f"queries[{i}] ({qid}) has an empty query string")
         relevant, graded = _parse_judgments(item.get("relevant"), qid)
+        expect = item.get("expect_color_leg")
+        if expect is not None:
+            expect = bool(expect)
+        tags = validate_query_tags(item.get("tags") or [], query_id=qid)
         queries.append(
             EvalQuery(
                 id=qid,
                 query=text,
                 relevant=relevant,
                 graded=graded,
-                tags=list(item.get("tags") or []),
+                tags=tags,
+                expect_color_leg=expect,
                 distill=item.get("distill") or {},
                 twelvelabs=item.get("twelvelabs") or {},
             )
@@ -225,6 +232,32 @@ class RunResult:
     detail: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _distill_cfg(arm: Arm, q: EvalQuery) -> dict[str, Any]:
+    """Arm defaults, then tag-derived Distill legs, then per-query distill{}."""
+    cfg = _merge(arm.distill)
+    derived = distill_legs_for_query(q.tags, q.expect_color_leg, query_id=q.id)
+    if derived is not None:
+        cfg = _merge(cfg, {"legs": derived})
+    return _merge(cfg, q.distill)
+
+
+def _tl_cfg(arm: Arm, q: EvalQuery) -> dict[str, Any]:
+    """Arm defaults, then tag-derived TL search_options, then per-query twelvelabs{}."""
+    cfg = _merge(arm.twelvelabs)
+    derived = tl_search_options_for_query(q.tags, q.expect_color_leg, query_id=q.id)
+    if derived is not None:
+        cfg = _merge(cfg, {"search_options": derived})
+    return _merge(cfg, q.twelvelabs)
+
+
+def _tl_search_options(cfg: dict[str, Any]) -> list[str]:
+    """Preserve an explicit empty list; default to visual only when the key is absent."""
+    options = cfg.get("search_options")
+    if options is None:
+        return ["visual"]
+    return list(options)
+
+
 async def run_distill(
     arm: Arm,
     q: EvalQuery,
@@ -232,7 +265,7 @@ async def run_distill(
     corpus: Corpus,
 ) -> RunResult:
     """One Distill hybrid search on its own session (sessions are not concurrency-safe)."""
-    cfg = _merge(arm.distill, q.distill)
+    cfg = _distill_cfg(arm, q)
     legs = cfg.get("legs")
     started = time.perf_counter()
     try:
@@ -297,7 +330,7 @@ async def run_twelvelabs(
     corpus: Corpus,
 ) -> RunResult:
     """One TwelveLabs search, paging until we have arm.limit distinct videos."""
-    cfg = _merge(arm.twelvelabs, q.twelvelabs)
+    cfg = _tl_cfg(arm, q)
     started = time.perf_counter()
     ranked: list[str] = []
     detail: list[dict[str, Any]] = []
@@ -305,7 +338,7 @@ async def run_twelvelabs(
     try:
         kwargs: dict[str, Any] = {
             "index_id": corpus.index_id,
-            "search_options": list(cfg.get("search_options") or ["visual"]),
+            "search_options": _tl_search_options(cfg),
             "query_text": q.query,
             "group_by": cfg.get("group_by") or "video",
             "operator": cfg.get("operator") or "or",
@@ -421,7 +454,12 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Only run this query id. Repeatable.",
     )
-    parser.add_argument("--tag", action="append", default=[], help="Only run queries with this tag.")
+    parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="Only run queries whose tags[] include this Distill-leg name.",
+    )
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--out", type=Path, default=None, help="Write full results JSON here.")
     parser.add_argument("--verbose", action="store_true", help="Print per-query rankings.")
@@ -459,19 +497,29 @@ def validate(arms: list[Arm], queries: list[EvalQuery], corpus: Corpus) -> list[
     warnings: list[str] = []
     for arm in arms:
         if arm.system == "distill":
-            legs = arm.distill.get("legs")
-            if legs is not None:
-                unknown = set(legs) - set(HYBRID_SEARCH_LEGS)
-                if unknown:
-                    raise SystemExit(
-                        f"arm {arm.name!r}: unknown leg(s) {sorted(unknown)}. "
-                        f"Valid: {list(HYBRID_SEARCH_LEGS)}"
-                    )
+            for q in queries:
+                legs = _distill_cfg(arm, q).get("legs")
+                if legs is not None:
+                    unknown = set(legs) - set(HYBRID_SEARCH_LEGS)
+                    if unknown:
+                        raise SystemExit(
+                            f"arm {arm.name!r} query {q.id}: unknown leg(s) "
+                            f"{sorted(unknown)}. Valid: {list(HYBRID_SEARCH_LEGS)}"
+                        )
         elif not corpus.index_id:
             raise SystemExit(
                 f"arm {arm.name!r} is a TwelveLabs arm but the state file has no "
                 "twelvelabs_index_id. Run create_twelvelabs_index.py first."
             )
+        else:
+            for q in queries:
+                options = _tl_search_options(_tl_cfg(arm, q))
+                if not options:
+                    raise SystemExit(
+                        f"arm {arm.name!r} query {q.id}: tags map to no TwelveLabs "
+                        "search_options (text/color have no TL analog). Add a visual "
+                        "or speech tag, or set twelvelabs.search_options on the query."
+                    )
 
     judged = {doc for q in queries for doc in q.relevant}
     missing = judged - corpus.ready_drive_ids
@@ -497,9 +545,15 @@ def validate(arms: list[Arm], queries: list[EvalQuery], corpus: Corpus) -> list[
     return warnings
 
 
-async def check_tl_index(client: Any, arms: list[Arm], index_id: str) -> None:
+async def check_tl_index(
+    client: Any,
+    arms: list[Arm],
+    queries: list[EvalQuery],
+    index_id: str,
+) -> None:
     """
-    Fail before spending queries if an arm asks for a modality the index lacks.
+    Fail before spending queries if any (arm, query) asks for a modality the
+    index lacks — including options derived from tags[], not only arm defaults.
 
     search_options must be a subset of the index's model_options; the API
     otherwise rejects the request per query.
@@ -513,15 +567,16 @@ async def check_tl_index(client: Any, arms: list[Arm], index_id: str) -> None:
     for arm in arms:
         if arm.system != "twelvelabs":
             continue
-        requested = set(arm.twelvelabs.get("search_options") or [])
-        missing = requested - available
-        if missing:
-            raise SystemExit(
-                f"arm {arm.name!r} requests search_options {sorted(missing)} but index "
-                f"{index_id} was built with model_options {sorted(available)}. "
-                "Modalities are fixed at index creation — create a new index and "
-                "re-sync to benchmark them."
-            )
+        for q in queries:
+            requested = set(_tl_search_options(_tl_cfg(arm, q)))
+            missing = requested - available
+            if missing:
+                raise SystemExit(
+                    f"arm {arm.name!r} query {q.id} requests search_options "
+                    f"{sorted(missing)} but index {index_id} was built with "
+                    f"model_options {sorted(available)}. Modalities are fixed at "
+                    "index creation — create a new index and re-sync to benchmark them."
+                )
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -558,7 +613,7 @@ async def run(args: argparse.Namespace) -> int:
                 "The twelvelabs package is required. Install with: pip install twelvelabs"
             ) from exc
         client = AsyncTwelveLabs(api_key=get_api_key())
-        await check_tl_index(client, arms, str(corpus.index_id))
+        await check_tl_index(client, arms, queries, str(corpus.index_id))
 
     async with async_session_maker() as session:
         user = await resolve_user(session, args.user)

@@ -12,6 +12,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.services.indexing import HYBRID_SEARCH_LEGS, IndexingService
+from eval_legs import distill_legs_for_query, tl_search_options_for_query
 from eval_metrics import (
     aggregate,
     average_precision,
@@ -27,8 +28,10 @@ import eval_search
 from run_eval import (
     Arm,
     EvalQuery,
+    _distill_cfg,
     _merge,
     _parse_judgments,
+    _tl_cfg,
     _tl_item_drive_id,
     build_corpus,
     load_queries,
@@ -309,6 +312,8 @@ class ConfigTests(unittest.TestCase):
             [j.drive_file_id for j in query_set.queries[0].relevant],
             queries[0].relevant,
         )
+        self.assertEqual(query_set.queries[0].tags, queries[0].tags)
+        self.assertEqual(query_set.queries[0].expect_color_leg, queries[0].expect_color_leg)
         self.assertTrue(arms)
 
     def test_eval_search_shares_the_leg_constant(self):
@@ -316,10 +321,127 @@ class ConfigTests(unittest.TestCase):
 
     def test_shipped_queries_file_parses(self):
         arms, queries, _ = load_queries(Path(__file__).parent / "eval_queries.json")
-        self.assertTrue(arms and queries)
+        self.assertEqual({a.name for a in arms}, {"distill", "twelvelabs"})
+        self.assertTrue(queries)
+        q001 = next(q for q in queries if q.id == "q001")
+        self.assertEqual(
+            q001.tags,
+            ["text", "thumbnail", "frame", "caption", "transcript"],
+        )
+        self.assertTrue(q001.expect_color_leg)
+        self.assertEqual(
+            distill_legs_for_query(q001.tags, q001.expect_color_leg),
+            list(HYBRID_SEARCH_LEGS),
+        )
+        self.assertEqual(
+            tl_search_options_for_query(q001.tags, q001.expect_color_leg),
+            ["visual", "audio"],
+        )
         for arm in arms:
             if arm.system == "distill" and arm.distill.get("legs") is not None:
                 self.assertFalse(set(arm.distill["legs"]) - set(HYBRID_SEARCH_LEGS))
+
+    def test_unknown_query_tag_rejected_at_load(self):
+        path = self._write(
+            {
+                "arms": [{"name": "a", "system": "distill"}],
+                "queries": [
+                    {"id": "q1", "query": "x", "tags": ["visual"], "relevant": ["d1"]}
+                ],
+            }
+        )
+        with self.assertRaises(ValueError):
+            load_queries(path)
+
+    def test_color_tag_rejected_at_load(self):
+        path = self._write(
+            {
+                "arms": [{"name": "a", "system": "distill"}],
+                "queries": [
+                    {"id": "q1", "query": "x", "tags": ["color"], "relevant": ["d1"]}
+                ],
+            }
+        )
+        with self.assertRaises(ValueError):
+            load_queries(path)
+
+
+class TagMappingTests(unittest.TestCase):
+    ALL_TAGS = ["text", "thumbnail", "frame", "caption", "transcript"]
+
+    def test_all_tags_plus_color_enable_every_distill_leg_and_both_tl_options(self):
+        self.assertEqual(
+            distill_legs_for_query(self.ALL_TAGS, True),
+            list(HYBRID_SEARCH_LEGS),
+        )
+        self.assertEqual(
+            tl_search_options_for_query(self.ALL_TAGS, True),
+            ["visual", "audio"],
+        )
+
+    def test_thumbnail_only_maps_to_visual(self):
+        self.assertEqual(distill_legs_for_query(["thumbnail"], False), ["thumbnail"])
+        self.assertEqual(tl_search_options_for_query(["thumbnail"], False), ["visual"])
+
+    def test_unknown_tag_raises(self):
+        with self.assertRaises(ValueError):
+            distill_legs_for_query(["visual"], None)
+
+    def test_color_in_tags_raises(self):
+        with self.assertRaises(ValueError):
+            distill_legs_for_query(["color"], None)
+
+    def test_empty_tags_fall_back_to_none(self):
+        self.assertIsNone(distill_legs_for_query([], False))
+        self.assertIsNone(tl_search_options_for_query([], None))
+        self.assertIsNone(distill_legs_for_query([], None))
+
+    def test_expect_color_leg_alone_selects_color(self):
+        self.assertEqual(distill_legs_for_query([], True), ["color"])
+        self.assertEqual(tl_search_options_for_query([], True), [])
+
+    def test_text_only_has_no_tl_options(self):
+        self.assertEqual(distill_legs_for_query(["text"], False), ["text"])
+        self.assertEqual(tl_search_options_for_query(["text"], False), [])
+
+    def test_tags_override_arm_legs_unless_query_block_wins(self):
+        arm = Arm(
+            name="distill",
+            system="distill",
+            limit=10,
+            distill={"legs": ["text"]},
+        )
+        tagged = EvalQuery(
+            id="q1",
+            query="a dog",
+            relevant=["d1"],
+            tags=["thumbnail", "frame"],
+            expect_color_leg=False,
+        )
+        self.assertEqual(_distill_cfg(arm, tagged)["legs"], ["thumbnail", "frame"])
+        override = EvalQuery(
+            id="q1",
+            query="a dog",
+            relevant=["d1"],
+            tags=["thumbnail", "frame"],
+            distill={"legs": ["caption"]},
+        )
+        self.assertEqual(_distill_cfg(arm, override)["legs"], ["caption"])
+
+    def test_tags_override_arm_tl_search_options(self):
+        arm = Arm(
+            name="twelvelabs",
+            system="twelvelabs",
+            limit=10,
+            twelvelabs={"search_options": ["visual"]},
+        )
+        tagged = EvalQuery(
+            id="q1",
+            query="someone talking",
+            relevant=["d1"],
+            tags=["transcript"],
+        )
+        self.assertEqual(_tl_cfg(arm, tagged)["search_options"], ["audio"])
 
 
 class CorpusTests(unittest.TestCase):

@@ -15,6 +15,7 @@
       "query": "teal and orange person walking",
       "file_type": "video",
       "notes": "Mixed content+grade. Content legs rank walking; color ranks the look; RRF fuses both.",
+      "tags": ["text", "thumbnail", "frame", "caption", "transcript"],
       "expect_color_leg": true,
       "relevant": [
         {"drive_file_id": "instagram:REPLACE_TEAL_ORANGE_WALKING_CLIP", "gain": 3}
