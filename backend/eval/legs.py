@@ -1,27 +1,30 @@
 """
-Map eval_queries.json fields to Distill hybrid-search legs and TwelveLabs
+Map queries.json fields to Distill hybrid-search legs and TwelveLabs
 search_options.
 
 This is the file to read for "what does this query field do on each system."
-run_eval.py and eval_search.py import the helpers below; do not duplicate the
+eval.run and eval.search import the helpers below; do not duplicate the
 table.
 
 Query JSON field -> Distill hybrid_search_rrf leg, TwelveLabs search_options
 ------------------------------------------------------------------------------
 tags[] values:
   "text"        Distill: filename trigram ("text")     TL: none
-  "thumbnail"   Distill: poster embedding              TL: "visual"
+  "thumbnail"   Distill: poster embedding              TL: none (index addon, not a search filter)
   "frame"       Distill: video frame embeddings        TL: "visual"
   "caption"     Distill: caption lexical+semantic      TL: "audio"
   "transcript"  Distill: transcript lexical+semantic   TL: "audio"
 expect_color_leg:
   true          Distill: color signature ("color")     TL: none
 
+TwelveLabs thumbnail is addons=["thumbnail"] at index creation. Search hits
+may include thumbnail_url; do not pass "thumbnail" in search_options.
+
 Do not put "color" in tags[]; use expect_color_leg. High-level aliases like
 "visual" are not accepted — name each Distill leg.
 
 When tags is empty and expect_color_leg is not true, the helpers return None
-so the caller keeps arm/defaults config (eval_search.py then runs every leg).
+so the caller keeps arm/defaults config (eval.search then runs every leg).
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ TAG_TO_DISTILL_LEG: dict[str, str] = {
 # text has no TL analog (filename search). Color is expect_color_leg, also no TL analog.
 TAG_TO_TL_OPTIONS: dict[str, tuple[str, ...]] = {
     "text": (),  # no TL analog (filename search)
-    "thumbnail": ("visual",),
+    "thumbnail": (),  # TL thumbnail is an index addon, not search_options
     "frame": ("visual",),
     "caption": ("audio",),
     "transcript": ("audio",),

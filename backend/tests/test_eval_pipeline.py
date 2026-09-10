@@ -9,11 +9,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.services.indexing import HYBRID_SEARCH_LEGS, IndexingService
-from eval_legs import distill_legs_for_query, tl_search_options_for_query
-from eval_metrics import (
+from eval.legs import distill_legs_for_query, tl_search_options_for_query
+from eval.metrics import (
     aggregate,
     average_precision,
     evaluate_query,
@@ -24,8 +24,8 @@ from eval_metrics import (
     recall_at_k,
     reciprocal_rank,
 )
-import eval_search
-from run_eval import (
+from eval import search as eval_search
+from eval.run import (
     Arm,
     EvalQuery,
     _distill_cfg,
@@ -302,9 +302,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(k_values, [1, 3, 5, 20])
 
     def test_shipped_file_is_readable_by_both_tools(self):
-        # eval_search.py defaults --queries to this same file, so the schema
+        # eval.search defaults --queries to this same file, so the schema
         # has to satisfy both loaders or one of them breaks.
-        path = Path(__file__).parent / "eval_queries.json"
+        path = Path(__file__).resolve().parent.parent / "eval" / "queries.json"
         query_set = eval_search.load_query_set(path)
         arms, queries, _ = load_queries(path)
         self.assertEqual(len(query_set.queries), len(queries))
@@ -320,7 +320,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(tuple(eval_search.LEGS), tuple(HYBRID_SEARCH_LEGS))
 
     def test_shipped_queries_file_parses(self):
-        arms, queries, _ = load_queries(Path(__file__).parent / "eval_queries.json")
+        arms, queries, _ = load_queries(Path(__file__).resolve().parent.parent / "eval" / "queries.json")
         self.assertEqual({a.name for a in arms}, {"distill", "twelvelabs"})
         self.assertTrue(queries)
         q001 = next(q for q in queries if q.id == "q001")
@@ -379,9 +379,9 @@ class TagMappingTests(unittest.TestCase):
             ["visual", "audio"],
         )
 
-    def test_thumbnail_only_maps_to_visual(self):
+    def test_thumbnail_only_has_no_tl_search_option(self):
         self.assertEqual(distill_legs_for_query(["thumbnail"], False), ["thumbnail"])
-        self.assertEqual(tl_search_options_for_query(["thumbnail"], False), ["visual"])
+        self.assertEqual(tl_search_options_for_query(["thumbnail"], False), [])
 
     def test_unknown_tag_raises(self):
         with self.assertRaises(ValueError):

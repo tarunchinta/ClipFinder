@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.services.color_signature import (
     HIST_DIM,
@@ -76,7 +76,7 @@ class QueryEncoderTests(unittest.TestCase):
     def test_eval_color_queries_match_encoder_contract(self):
         import json
 
-        path = Path(__file__).parent / "eval_color_queries.json"
+        path = Path(__file__).resolve().parent.parent / "eval" / "color_queries.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         for case in data["queries"]:
             probe = encode_query(case["query"])

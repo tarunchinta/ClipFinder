@@ -2,7 +2,7 @@
 Ranking metrics for the Distill vs TwelveLabs benchmark.
 
 Pure functions over ranked ID lists — no database, no network — so they can be
-unit-tested directly. `run_eval.py` normalizes both systems' responses into
+unit-tested directly. `eval.run` normalizes both systems' responses into
 ranked lists of drive_file_ids and hands them here.
 
 Binary relevance drives recall/precision/MRR/hit-rate; graded relevance (when

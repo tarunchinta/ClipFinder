@@ -6,7 +6,7 @@ that don't have vision embeddings yet.
 
 Usage:
     cd backend
-    python backfill_vision_embeddings.py [batch_size]
+    python scripts/backfill_vision_embeddings.py [batch_size]
 
 Make sure your .env file has Gemini API credentials set:
     - GEMINI_API_KEY (or GOOGLE_AI_VISION_API_KEY)
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 # Add the backend directory to the path so we can import app modules
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select, func
 from app.database import async_session_maker
@@ -231,8 +231,8 @@ if __name__ == "__main__":
             batch_size = int(sys.argv[1])
         except ValueError:
             print(f"Invalid batch size: {sys.argv[1]}")
-            print("Usage: python backfill_vision_embeddings.py [batch_size]")
-            print("       python backfill_vision_embeddings.py --stats")
+            print("Usage: python scripts/backfill_vision_embeddings.py [batch_size]")
+            print("       python scripts/backfill_vision_embeddings.py --stats")
             sys.exit(1)
     else:
         batch_size = 50

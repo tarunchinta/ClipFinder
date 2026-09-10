@@ -5,14 +5,14 @@ Enables every Marengo model option and every supported addon:
   - model_options: visual, audio
   - addons: thumbnail
 
-Writes the resulting index id into eval_tl_sync_state.json so
-sync_twelvelabs_index.py can reuse it.
+Writes the resulting index id into tl_sync_state.json so
+eval.sync_twelvelabs_index can reuse it.
 
 Usage:
     cd backend
-    python create_twelvelabs_index.py
-    python create_twelvelabs_index.py --name distill-benchmark-v1
-    python create_twelvelabs_index.py --force   # replace index id in state
+    python -m eval.create_twelvelabs_index
+    python -m eval.create_twelvelabs_index --name distill-benchmark-v1
+    python -m eval.create_twelvelabs_index --force   # replace index id in state
 
 Requires TWELVELABS_API_KEY or TWELVE_LABS_API_KEY in the environment or backend/.env.
 """
@@ -29,14 +29,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_STATE = BASE_DIR / "eval_tl_sync_state.json"
+BACKEND_DIR = BASE_DIR.parent
+DEFAULT_STATE = BASE_DIR / "tl_sync_state.json"
 
 # Marengo index config — full modality + addon surface currently documented.
 MARENGO_MODEL_NAME = "marengo3.0"
 MARENGO_MODEL_OPTIONS = ["visual", "audio"]
 MARENGO_ADDONS = ["thumbnail"]
 
-load_dotenv(BASE_DIR / ".env", override=False)
+load_dotenv(BACKEND_DIR / ".env", override=False)
 
 
 def utc_now_iso() -> str:

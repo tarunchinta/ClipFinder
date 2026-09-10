@@ -1,0 +1,300 @@
+{
+  "generated_at": "2026-09-10T04:00:40Z",
+  "twelvelabs_index_id": "6a9d8422cf24a032539d87bc",
+  "corpus_size": 1,
+  "k_values": [
+    1,
+    3,
+    5,
+    10
+  ],
+  "warnings": [
+    "Only 1 video(s) are indexed on the TwelveLabs side. Ranking metrics on a corpus this small are dominated by noise \u2014 treat results as a smoke test, not a benchmark."
+  ],
+  "arms": [
+    {
+      "name": "distill",
+      "system": "distill",
+      "limit": 10,
+      "config": {
+        "legs": [
+          "text",
+          "thumbnail",
+          "frame",
+          "caption",
+          "transcript",
+          "color"
+        ]
+      },
+      "summary": {
+        "mrr": 0.0,
+        "recall@1": 0.0,
+        "precision@1": 0.0,
+        "hit_rate@1": 0.0,
+        "map@1": 0.0,
+        "ndcg@1": 0.0,
+        "recall@3": 0.0,
+        "precision@3": 0.0,
+        "hit_rate@3": 0.0,
+        "map@3": 0.0,
+        "ndcg@3": 0.0,
+        "recall@5": 0.0,
+        "precision@5": 0.0,
+        "hit_rate@5": 0.0,
+        "map@5": 0.0,
+        "ndcg@5": 0.0,
+        "recall@10": 0.0,
+        "precision@10": 0.0,
+        "hit_rate@10": 0.0,
+        "map@10": 0.0,
+        "ndcg@10": 0.0
+      },
+      "latency_ms": {
+        "p50": 5227.348499989603,
+        "p95": 5227.348499989603
+      }
+    },
+    {
+      "name": "twelvelabs",
+      "system": "twelvelabs",
+      "limit": 10,
+      "config": {
+        "search_options": [
+          "visual",
+          "audio"
+        ],
+        "group_by": "video",
+        "operator": "or"
+      },
+      "summary": {
+        "mrr": 1.0,
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "map@1": 1.0,
+        "ndcg@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "map@3": 1.0,
+        "ndcg@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "map@5": 1.0,
+        "ndcg@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "map@10": 1.0,
+        "ndcg@10": 1.0
+      },
+      "latency_ms": {
+        "p50": 260.41330001316965,
+        "p95": 260.41330001316965
+      }
+    }
+  ],
+  "runs": [
+    {
+      "arm": "distill",
+      "system": "distill",
+      "query_id": "q001",
+      "query": "fashion is a form of resistance and art",
+      "ranked": [
+        "instagram:DaHOthUpwWA",
+        "instagram:DbZgggNJy_e",
+        "instagram:Dcg6TfJsAE3",
+        "instagram:DaoQPDlySDe",
+        "instagram:DaA2RRQKwmR",
+        "instagram:Db8P4fwgPHa",
+        "instagram:DcqPUJPoKFY",
+        "instagram:DcZrizTJZun",
+        "instagram:DbLlJUIyj10",
+        "instagram:DZ-qr9LhVag"
+      ],
+      "relevant": [
+        "instagram:DX5ktNIOwx7"
+      ],
+      "raw_count": 10,
+      "latency_ms": 5227.3,
+      "metrics": {
+        "mrr": 0.0,
+        "recall@1": 0.0,
+        "precision@1": 0.0,
+        "hit_rate@1": 0.0,
+        "map@1": 0.0,
+        "ndcg@1": 0.0,
+        "recall@3": 0.0,
+        "precision@3": 0.0,
+        "hit_rate@3": 0.0,
+        "map@3": 0.0,
+        "ndcg@3": 0.0,
+        "recall@5": 0.0,
+        "precision@5": 0.0,
+        "hit_rate@5": 0.0,
+        "map@5": 0.0,
+        "ndcg@5": 0.0,
+        "recall@10": 0.0,
+        "precision@10": 0.0,
+        "hit_rate@10": 0.0,
+        "map@10": 0.0,
+        "ndcg@10": 0.0
+      },
+      "detail": [
+        {
+          "drive_file_id": "instagram:DaHOthUpwWA",
+          "filename": "Video by aristides.lab.mp4",
+          "hybrid_score": 0.074375,
+          "legs": {
+            "text": 0.016393,
+            "thumbnail": 0.013699,
+            "frame": 0.015385,
+            "caption": 0.013514,
+            "transcript": 0.015385
+          }
+        },
+        {
+          "drive_file_id": "instagram:DbZgggNJy_e",
+          "filename": "Video by max.dur.mp4",
+          "hybrid_score": 0.061704,
+          "legs": {
+            "thumbnail": 0.014286,
+            "frame": 0.015873,
+            "caption": 0.015152,
+            "transcript": 0.016393
+          }
+        },
+        {
+          "drive_file_id": "instagram:Dcg6TfJsAE3",
+          "filename": "Video by ryanyee.me.mp4",
+          "hybrid_score": 0.060263,
+          "legs": {
+            "text": 0.015385,
+            "thumbnail": 0.015152,
+            "frame": 0.016393,
+            "caption": 0.013333
+          }
+        },
+        {
+          "drive_file_id": "instagram:DaoQPDlySDe",
+          "filename": "Video by vita.au.mp4",
+          "hybrid_score": 0.047891,
+          "legs": {
+            "text": 0.015625,
+            "thumbnail": 0.016393,
+            "caption": 0.015873
+          }
+        },
+        {
+          "drive_file_id": "instagram:DaA2RRQKwmR",
+          "filename": "Video by lou.kadara.mp4",
+          "hybrid_score": 0.046927,
+          "legs": {
+            "thumbnail": 0.015873,
+            "frame": 0.016129,
+            "caption": 0.014925
+          }
+        },
+        {
+          "drive_file_id": "instagram:Db8P4fwgPHa",
+          "filename": "Video by k_ansh.mp4",
+          "hybrid_score": 0.045839,
+          "legs": {
+            "text": 0.016129,
+            "thumbnail": 0.014085,
+            "caption": 0.015625
+          }
+        },
+        {
+          "drive_file_id": "instagram:DcqPUJPoKFY",
+          "filename": "Video by harryplowden.mp4",
+          "hybrid_score": 0.045139,
+          "legs": {
+            "thumbnail": 0.015625,
+            "caption": 0.013889,
+            "transcript": 0.015625
+          }
+        },
+        {
+          "drive_file_id": "instagram:DcZrizTJZun",
+          "filename": "Video by howtohumaninc.mp4",
+          "hybrid_score": 0.045087,
+          "legs": {
+            "thumbnail": 0.013333,
+            "frame": 0.015625,
+            "caption": 0.016129
+          }
+        },
+        {
+          "drive_file_id": "instagram:DbLlJUIyj10",
+          "filename": "Video by haio3d.mp4",
+          "hybrid_score": 0.044859,
+          "legs": {
+            "thumbnail": 0.014493,
+            "caption": 0.014493,
+            "transcript": 0.015873
+          }
+        },
+        {
+          "drive_file_id": "instagram:DZ-qr9LhVag",
+          "filename": "Video by jesslwiseman.mp4",
+          "hybrid_score": 0.044102,
+          "legs": {
+            "thumbnail": 0.013889,
+            "caption": 0.014085,
+            "transcript": 0.016129
+          }
+        }
+      ]
+    },
+    {
+      "arm": "twelvelabs",
+      "system": "twelvelabs",
+      "query_id": "q001",
+      "query": "fashion is a form of resistance and art",
+      "ranked": [
+        "instagram:DX5ktNIOwx7"
+      ],
+      "relevant": [
+        "instagram:DX5ktNIOwx7"
+      ],
+      "raw_count": 1,
+      "latency_ms": 260.4,
+      "metrics": {
+        "mrr": 1.0,
+        "recall@1": 1.0,
+        "precision@1": 1.0,
+        "hit_rate@1": 1.0,
+        "map@1": 1.0,
+        "ndcg@1": 1.0,
+        "recall@3": 1.0,
+        "precision@3": 0.3333333333333333,
+        "hit_rate@3": 1.0,
+        "map@3": 1.0,
+        "ndcg@3": 1.0,
+        "recall@5": 1.0,
+        "precision@5": 0.2,
+        "hit_rate@5": 1.0,
+        "map@5": 1.0,
+        "ndcg@5": 1.0,
+        "recall@10": 1.0,
+        "precision@10": 0.1,
+        "hit_rate@10": 1.0,
+        "map@10": 1.0,
+        "ndcg@10": 1.0
+      },
+      "detail": [
+        {
+          "drive_file_id": "instagram:DX5ktNIOwx7",
+          "tl_video_id": "6a9d842b5c930dcf6c591c2d",
+          "rank": null,
+          "start": null,
+          "end": null,
+          "thumbnail_url": "https://deuqpmn4rs7j5.cloudfront.net/6a9d6d62725586c2552ddabb/assets/6a9d8425cf24a032539d87bd/thumbnails/55.jpeg"
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

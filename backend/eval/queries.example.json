@@ -1,5 +1,5 @@
 {
-  "description": "Example query set — copy to eval_queries.json and replace with real drive_file_ids from your dev account.",
+  "description": "Example query set — copy to queries.json and replace with real drive_file_ids from your dev account.",
   "default_k": 10,
   "queries": [
     {

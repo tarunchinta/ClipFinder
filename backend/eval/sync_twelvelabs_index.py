@@ -1,21 +1,21 @@
 """
-Sync Distill-indexed videos from eval_corpus.json into a TwelveLabs index.
+Sync Distill-indexed videos from corpus.json into a TwelveLabs index.
 
-Idempotent: videos already recorded as status=ready in eval_tl_sync_state.json
+Idempotent: videos already recorded as status=ready in tl_sync_state.json
 are skipped. Append drive_file_id entries to the corpus manifest and re-run to
 index only the delta.
 
 Prerequisites:
   1. Videos already indexed in Distill with blob_video_url set
   2. TWELVELABS_API_KEY set
-  3. A TwelveLabs index id in eval_tl_sync_state.json
-     (run create_twelvelabs_index.py first, or pass --create-index)
+  3. A TwelveLabs index id in tl_sync_state.json
+     (run python -m eval.create_twelvelabs_index first, or pass --create-index)
 
 Usage:
     cd backend
-    python sync_twelvelabs_index.py --user you@example.com
-    python sync_twelvelabs_index.py --user you@example.com --create-index
-    python sync_twelvelabs_index.py --user you@example.com --force instagram:DX5ktNIOwx7
+    python -m eval.sync_twelvelabs_index --user you@example.com
+    python -m eval.sync_twelvelabs_index --user you@example.com --create-index
+    python -m eval.sync_twelvelabs_index --user you@example.com --force instagram:DX5ktNIOwx7
 
 Does not delete videos removed from the manifest.
 """
@@ -34,13 +34,13 @@ from uuid import UUID
 
 from sqlalchemy import select
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.database import async_session_maker
 from app.models.indexed_file import IndexedFile, IndexingStatus
 from app.models.user import User
 from app.services.video_frame_indexing import get_blob_url_with_sas
-from create_twelvelabs_index import (
+from eval.create_twelvelabs_index import (
     create_index,
     get_api_key,
     load_state,
@@ -48,9 +48,9 @@ from create_twelvelabs_index import (
     utc_now_iso,
 )
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_MANIFEST = BASE_DIR / "eval_corpus.json"
-DEFAULT_STATE = BASE_DIR / "eval_tl_sync_state.json"
+EVAL_DIR = Path(__file__).resolve().parent
+DEFAULT_MANIFEST = EVAL_DIR / "corpus.json"
+DEFAULT_STATE = EVAL_DIR / "tl_sync_state.json"
 POLL_SECONDS = 5
 
 
@@ -290,7 +290,7 @@ async def run(args: argparse.Namespace) -> int:
     if not index_id:
         if not args.create_index and not args.dry_run:
             print(
-                "No twelvelabs_index_id in state. Run create_twelvelabs_index.py "
+                "No twelvelabs_index_id in state. Run python -m eval.create_twelvelabs_index "
                 "or pass --create-index.",
                 file=sys.stderr,
             )

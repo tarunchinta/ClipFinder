@@ -14,13 +14,13 @@ the share of relevant files each leg retrieved on its own.
 
 Usage:
     cd backend
-    python eval_search.py --user dev@example.com --queries eval_queries.json
+    python -m eval.search --user dev@example.com --queries eval/queries.json
 
     # metrics at a different cutoff, deeper candidate list, tuned RRF constant
-    python eval_search.py --user dev@example.com --k 5 --limit 100 --rrf-k 30
+    python -m eval.search --user dev@example.com --k 5 --limit 100 --rrf-k 30
 
     # machine-readable report for diffing between runs
-    python eval_search.py --user dev@example.com --json-out report.json
+    python -m eval.search --user dev@example.com --json-out report.json
 
 Requires the same .env the app uses (DATABASE_URL at minimum). Without Gemini
 credentials the two semantic legs return nothing and the eval silently measures
@@ -39,7 +39,7 @@ from typing import Optional
 from uuid import UUID
 
 # Add the backend directory to the path so we can import app modules
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select
 
@@ -48,7 +48,7 @@ from app.models.indexed_file import IndexedFile
 from app.models.user import User
 from app.services.indexing import HYBRID_SEARCH_LEGS, IndexingService
 from app.services.vision_embedding import get_vision_embedding_service
-from eval_legs import distill_legs_for_query, validate_query_tags
+from eval.legs import distill_legs_for_query, validate_query_tags
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ class QueryCase:
     tags: list[str] = field(default_factory=list)
     # None = do not check. False = color_score must be 0 on every hit
     # (query has no color language). True = enable Distill's color leg and
-    # assert it contributed a score. See eval_legs.py for the tag mapping.
+    # assert it contributed a score. See eval.legs for the tag mapping.
     expect_color_leg: Optional[bool] = None
 
 
@@ -111,7 +111,7 @@ def load_query_set(path: Path) -> QuerySet:
     graded gains (3 = ideal answer, 1 = acceptable) to make nDCG meaningful;
     recall/precision/MRR treat any listed file as relevant either way.
 
-    "tags" names Distill hybrid_search_rrf legs; see eval_legs.py for how each
+    "tags" names Distill hybrid_search_rrf legs; see eval.legs for how each
     maps onto Distill and TwelveLabs. Empty tags plus expect_color_leg other
     than true leaves every Distill leg enabled (arm/defaults behavior).
 
@@ -201,7 +201,7 @@ def ndcg_at_k(ranked: list[UUID], gains: dict[UUID, float], k: int) -> float:
 # Per-query execution
 # ---------------------------------------------------------------------------
 
-# Single source of truth, shared with hybrid_search_rrf and run_eval.py.
+# Single source of truth, shared with hybrid_search_rrf and eval.run.
 LEGS = HYBRID_SEARCH_LEGS
 
 
@@ -407,8 +407,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--queries",
         type=Path,
-        default=Path(__file__).parent / "eval_queries.json",
-        help="Path to the query set JSON (default: eval_queries.json).",
+        default=Path(__file__).parent / "queries.json",
+        help="Path to the query set JSON (default: eval/queries.json).",
     )
     parser.add_argument(
         "--k",

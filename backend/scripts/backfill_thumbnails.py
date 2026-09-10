@@ -8,8 +8,8 @@ JPEG with ffmpeg, uploads it, and generates Gemini embeddings.
 
 Usage:
     cd backend
-    python backfill_thumbnails.py
-    python backfill_thumbnails.py --limit 20
+    python scripts/backfill_thumbnails.py
+    python scripts/backfill_thumbnails.py --limit 20
 
 Requires DATABASE_URL, AZURE_BLOB_CONNECTION_STRING, and GEMINI_API_KEY
 (embeddings are skipped when Gemini is not configured).
@@ -25,7 +25,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import or_, select
 

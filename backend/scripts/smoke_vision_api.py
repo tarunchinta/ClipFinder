@@ -6,7 +6,7 @@ API reference: https://ai.google.dev/gemini-api/docs/embeddings
 
 Tests text and image embedding via Google AI Studio embedContent endpoint.
 
-Run with: python test_vision_api.py
+Run with: python scripts/smoke_vision_api.py
 """
 
 import asyncio
@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 GEMINI_EMBED_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")

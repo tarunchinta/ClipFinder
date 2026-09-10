@@ -1,11 +1,11 @@
 """
 Run search queries against Distill and TwelveLabs in parallel and score both.
 
-Reads three files:
-  - eval_tl_sync_state.json  which corpus videos are live in the TL index,
-                             and the drive_file_id <-> tl_video_id mapping
-  - eval_corpus.json         the shared corpus manifest
-  - eval_queries.json        queries, relevance judgments, and arm configs
+Reads three files in this package:
+  - tl_sync_state.json  which corpus videos are live in the TL index,
+                        and the drive_file_id <-> tl_video_id mapping
+  - corpus.json         the shared corpus manifest
+  - queries.json        queries, relevance judgments, and arm configs
 
 An "arm" is one system under one configuration. Every (arm, query) pair is an
 independent task and they all run concurrently, so a Distill leg sweep and a
@@ -18,11 +18,11 @@ order".
 
 Usage:
     cd backend
-    python run_eval.py --user you@example.com
-    python run_eval.py --user you@example.com --arm distill --arm twelvelabs
-    python run_eval.py --user you@example.com --query-id q001 --verbose
-    python run_eval.py --user you@example.com --out results.json
-    python run_eval.py --user you@example.com --dry-run
+    python -m eval.run --user you@example.com
+    python -m eval.run --user you@example.com --arm distill --arm twelvelabs
+    python -m eval.run --user you@example.com --query-id q001 --verbose
+    python -m eval.run --user you@example.com --out results.json
+    python -m eval.run --user you@example.com --dry-run
 
 Requires TWELVELABS_API_KEY (unless every selected arm is Distill-only) and the
 same database configuration the app uses.
@@ -40,18 +40,18 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.database import async_session_maker
 from app.services.indexing import HYBRID_SEARCH_LEGS, IndexingService
-from create_twelvelabs_index import get_api_key, load_state
-from eval_legs import distill_legs_for_query, tl_search_options_for_query, validate_query_tags
-from eval_metrics import aggregate, evaluate_query, percentile
-from sync_twelvelabs_index import resolve_user
+from eval.create_twelvelabs_index import get_api_key, load_state
+from eval.legs import distill_legs_for_query, tl_search_options_for_query, validate_query_tags
+from eval.metrics import aggregate, evaluate_query, percentile
+from eval.sync_twelvelabs_index import resolve_user
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_STATE = BASE_DIR / "eval_tl_sync_state.json"
-DEFAULT_QUERIES = BASE_DIR / "eval_queries.json"
+EVAL_DIR = Path(__file__).resolve().parent
+DEFAULT_STATE = EVAL_DIR / "tl_sync_state.json"
+DEFAULT_QUERIES = EVAL_DIR / "queries.json"
 DEFAULT_CONCURRENCY = 8
 
 
@@ -96,7 +96,7 @@ def _parse_judgments(
     """
     Parse a query's relevant[] into (binary ids, graded gains).
 
-    Accepts eval_search.py's schema, [{"drive_file_id": ..., "gain": 3}], which
+    Accepts eval.search's schema, [{"drive_file_id": ..., "gain": 3}], which
     is the shared format — both tools read the same judgments file. A bare
     string is also accepted and means gain 1.0.
     """
@@ -366,6 +366,7 @@ async def run_twelvelabs(
                     "rank": getattr(item, "rank", None),
                     "start": getattr(item, "start", None),
                     "end": getattr(item, "end", None),
+                    "thumbnail_url": _tl_item_thumbnail_url(item),
                 }
             )
             if len(ranked) >= arm.limit:
@@ -407,6 +408,25 @@ def _tl_item_drive_id(item: Any, corpus: Corpus) -> Optional[str]:
         value = getattr(item, key, None)
         if value and str(value) in corpus.tl_video_to_drive:
             return corpus.tl_video_to_drive[str(value)]
+    return None
+
+
+def _tl_item_thumbnail_url(item: Any) -> Optional[str]:
+    """
+    Thumbnail URL from a search hit when the index has the thumbnail addon.
+
+    group_by=video may nest clips; take the first URL we find.
+    """
+    direct = getattr(item, "thumbnail_url", None)
+    if direct:
+        return str(direct)
+    clips = getattr(item, "clips", None) or getattr(item, "clips_data", None) or []
+    for clip in clips:
+        url = getattr(clip, "thumbnail_url", None)
+        if url:
+            return str(url)
+        if isinstance(clip, dict) and clip.get("thumbnail_url"):
+            return str(clip["thumbnail_url"])
     return None
 
 
@@ -509,7 +529,7 @@ def validate(arms: list[Arm], queries: list[EvalQuery], corpus: Corpus) -> list[
         elif not corpus.index_id:
             raise SystemExit(
                 f"arm {arm.name!r} is a TwelveLabs arm but the state file has no "
-                "twelvelabs_index_id. Run create_twelvelabs_index.py first."
+                "twelvelabs_index_id. Run python -m eval.create_twelvelabs_index first."
             )
         else:
             for q in queries:
@@ -528,7 +548,7 @@ def validate(arms: list[Arm], queries: list[EvalQuery], corpus: Corpus) -> list[
             f"{len(missing)} judged video(s) are not status=ready in the sync state and "
             f"cannot be returned by TwelveLabs: {sorted(missing)[:5]}"
             f"{' ...' if len(missing) > 5 else ''}. Recall is capped for TL arms until "
-            "sync_twelvelabs_index.py indexes them."
+            "python -m eval.sync_twelvelabs_index indexes them."
         )
     unjudged = [q.id for q in queries if not q.relevant]
     if unjudged:
@@ -559,6 +579,21 @@ async def check_tl_index(
     otherwise rejects the request per query.
     """
     index = await client.indexes.retrieve(index_id)
+    addons = set()
+    raw_addons = getattr(index, "addons", None) or []
+    for addon in raw_addons:
+        if isinstance(addon, str):
+            addons.add(addon)
+        else:
+            name = getattr(addon, "name", None) or getattr(addon, "id", None)
+            if name:
+                addons.add(str(name))
+    if "thumbnail" not in addons:
+        raise SystemExit(
+            f"index {index_id} has no thumbnail addon (addons={sorted(addons) or 'none'}). "
+            "Thumbnail is enabled at index creation (addons=['thumbnail']), not via "
+            "search_options. Create a new index with that addon and re-sync."
+        )
     available: set[str] = set()
     for model in getattr(index, "models", None) or []:
         available.update(getattr(model, "model_options", None) or [])

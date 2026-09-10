@@ -7,8 +7,8 @@ blob_thumbnail_url or thumbnail_url.
 
 Usage:
     cd backend
-    python backfill_color_signatures.py
-    python backfill_color_signatures.py --limit 20
+    python scripts/backfill_color_signatures.py
+    python scripts/backfill_color_signatures.py --limit 20
 
 Requires DATABASE_URL. Azure Blob (or reachable thumbnail URLs) is needed to
 read the stored JPEGs.
@@ -22,7 +22,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select
 
