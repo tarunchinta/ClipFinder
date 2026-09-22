@@ -16,7 +16,7 @@ from app.database import create_db_and_tables
 from app.mcp_server.auth import StaticBearerAuthMiddleware
 from app.mcp_server.oauth import McpOAuthCorsMiddleware, router as mcp_oauth_router
 from app.mcp_server.server import mcp, mcp_http_app
-from app.routers import auth_router, pages_router, drive_router, reels_router
+from app.routers import auth_router, pages_router, drive_router, reels_router, niaf_router
 
 # Configure logging so app and router logs are visible
 logging.basicConfig(
@@ -114,6 +114,9 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(pages_router)
 app.include_router(drive_router)
 app.include_router(reels_router)
+
+# NIAF-Bench pages (standalone surface, no auth, independent of the MCP server)
+app.include_router(niaf_router)
 
 # OAuth endpoints + discovery metadata for claude.ai custom connectors
 app.include_router(mcp_oauth_router)

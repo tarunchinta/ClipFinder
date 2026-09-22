@@ -1,0 +1,1598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NIAF-Bench Template</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap">
+<style>
+  :root {
+    color-scheme: light;
+    --page:      #eef0f3;
+    --surface:   #f7f8f9;
+    --surface-2: #e7eaef;
+    --ink:       #10131a;
+    --ink-2:     #4a5260;
+    --muted:     #79828f;
+    --rule:      #dde1e7;
+    --rule-2:    #c8cdd6;
+    --distill:   #eb6834;
+    --twelve:    #2a78d6;
+    --div-mid:   #cfd4db;
+    --warn-bg:   #fdf3e4;
+    --warn-ink:  #7a4b12;
+    --warn-rule: #e7c589;
+    --err-bg:    #fdecec;
+    --err-ink:   #8c2020;
+    --err-rule:  #e9a7a7;
+
+    --f-display: "Newsreader", Georgia, "Times New Roman", serif;
+    --f-body:    "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --f-mono:    "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --wrap: 720px;
+    --wide: 980px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:      #0e1013;
+      --surface:   #16181c;
+      --surface-2: #1e2127;
+      --ink:       #f2f4f7;
+      --ink-2:     #aab3c0;
+      --muted:     #79828f;
+      --rule:      #262a32;
+      --rule-2:    #363c46;
+      --distill:   #d95926;
+      --twelve:    #3987e5;
+      --div-mid:   #2c313a;
+      --warn-bg:   #241b0e;
+      --warn-ink:  #e6c084;
+      --warn-rule: #4d3a1a;
+      --err-bg:    #2a1414;
+      --err-ink:   #f0a0a0;
+      --err-rule:  #5a2727;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:      #0e1013;
+    --surface:   #16181c;
+    --surface-2: #1e2127;
+    --ink:       #f2f4f7;
+    --ink-2:     #aab3c0;
+    --muted:     #79828f;
+    --rule:      #262a32;
+    --rule-2:    #363c46;
+    --distill:   #d95926;
+    --twelve:    #3987e5;
+    --div-mid:   #2c313a;
+    --warn-bg:   #241b0e;
+    --warn-ink:  #e6c084;
+    --warn-rule: #4d3a1a;
+    --err-bg:    #2a1414;
+    --err-ink:   #f0a0a0;
+    --err-rule:  #5a2727;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .specimen {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 50;
+    background: var(--warn-bg);
+    border-bottom: 1px solid var(--warn-rule);
+    color: var(--warn-ink);
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    letter-spacing: .02em;
+    line-height: 1.45;
+  }
+  .specimen .inner {
+    max-width: var(--wide);
+    margin: 0 auto;
+    padding: 7px 16px;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .specimen b {
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .09em;
+    border: 1px solid var(--warn-rule);
+    border-radius: 2px;
+    padding: 1px 6px;
+    flex: none;
+  }
+
+  #checks {
+    background: var(--err-bg);
+    border-bottom: 1px solid var(--err-rule);
+    color: var(--err-ink);
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+  }
+  #checks .inner { max-width: var(--wide); margin: 0 auto; padding: 8px 16px; }
+  #checks ul { margin: 4px 0 0; padding-left: 18px; }
+
+  .wrap { max-width: var(--wrap); margin: 0 auto; padding-inline: 16px; }
+  .wide { max-width: var(--wide); margin: 0 auto; padding-inline: 16px; }
+
+  header.masthead { padding-block: 56px 28px; }
+  .kicker {
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--distill);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 500;
+    font-size: clamp(2.1rem, 6.4vw, 3.4rem);
+    line-height: 1.08;
+    letter-spacing: -.015em;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-family: var(--f-display);
+    font-size: clamp(1.05rem, 2.6vw, 1.28rem);
+    line-height: 1.5;
+    color: var(--ink-2);
+    margin: 0 0 30px;
+    max-width: 34em;
+  }
+  .byline {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex; flex-wrap: wrap; gap: 6px 14px;
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+  }
+
+  .fingerprint {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    padding: 14px 16px;
+    margin-block: 26px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+    gap: 12px 20px;
+    overflow-x: auto;
+  }
+  .fingerprint dt { color: var(--muted); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 2px; }
+  .fingerprint dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .tldr {
+    border-left: 3px solid var(--distill);
+    background: var(--surface);
+    border-radius: 0 3px 3px 0;
+    padding: 20px 22px;
+    margin-block: 34px;
+  }
+  .tldr h2 {
+    font-family: var(--f-mono);
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 14px; font-weight: 500;
+  }
+  .tldr ul { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 12px; }
+  .tldr li { display: grid; grid-template-columns: 1.6rem 1fr; gap: 10px; font-size: 15.5px; line-height: 1.55; }
+  .tldr li::before {
+    content: attr(data-n);
+    font-family: var(--f-mono); font-size: 11px; color: var(--muted);
+    padding-top: .32em;
+  }
+  .tldr .repo { margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--rule); font-family: var(--f-mono); font-size: 12.5px; }
+
+  section { padding-block: 26px; }
+  h2.sec {
+    font-family: var(--f-display);
+    font-weight: 500;
+    font-size: clamp(1.45rem, 3.6vw, 1.92rem);
+    line-height: 1.2;
+    letter-spacing: -.01em;
+    margin: 30px 0 4px;
+    text-wrap: balance;
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  h2.sec .num {
+    font-family: var(--f-mono); font-size: 12px; color: var(--distill);
+    letter-spacing: .06em; flex: none; padding-top: .2em;
+  }
+  h3 {
+    font-family: var(--f-body);
+    font-weight: 600; font-size: 1rem;
+    letter-spacing: .01em;
+    margin: 30px 0 8px;
+  }
+  h3 .sub { font-family: var(--f-mono); font-size: 11.5px; color: var(--muted); font-weight: 400; margin-right: 8px; }
+  p { margin: 0 0 16px; max-width: 65ch; }
+  a { color: var(--twelve); text-underline-offset: 2px; }
+  a:focus-visible, button:focus-visible, .chip:focus-visible { outline: 2px solid var(--distill); outline-offset: 2px; border-radius: 2px; }
+  ul.body { margin: 0 0 16px; padding-left: 1.1em; max-width: 65ch; }
+  ul.body li { margin-bottom: 7px; }
+  code, .mono { font-family: var(--f-mono); font-size: .88em; }
+  code { background: var(--surface-2); padding: 1px 4px; border-radius: 2px; }
+  strong { font-weight: 600; }
+  .lede { font-size: 17px; color: var(--ink-2); }
+
+  .note {
+    font-size: 14px; color: var(--ink-2);
+    border-left: 2px solid var(--rule-2);
+    padding: 2px 0 2px 14px;
+    margin-block: 20px;
+    max-width: 62ch;
+  }
+
+  figure {
+    margin: 30px 0;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .fig-head {
+    padding: 15px 18px 13px;
+    border-bottom: 1px solid var(--rule);
+    display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; justify-content: space-between;
+  }
+  .fig-id { font-family: var(--f-mono); font-size: 11px; letter-spacing: .12em; color: var(--distill); text-transform: uppercase; }
+  .fig-title { font-weight: 600; font-size: 14.5px; margin: 3px 0 0; }
+  .fig-body { padding: 16px 18px 6px; }
+  figcaption {
+    padding: 12px 18px 16px;
+    font-size: 13px; line-height: 1.55; color: var(--ink-2);
+    border-top: 1px solid var(--rule);
+    background: var(--surface);
+  }
+  .synthetic {
+    font-family: var(--f-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--warn-ink); background: var(--warn-bg); border: 1px solid var(--warn-rule);
+    border-radius: 2px; padding: 2px 6px; flex: none; white-space: nowrap;
+  }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 0 18px 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--rule-2); border-radius: 3px; overflow: hidden; }
+  .seg button {
+    font-family: var(--f-mono); font-size: 11.5px; letter-spacing: .04em;
+    background: transparent; color: var(--ink-2); border: 0; cursor: pointer;
+    padding: 6px 11px; line-height: 1.3;
+  }
+  .seg button + button { border-left: 1px solid var(--rule-2); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--page); }
+  .chip {
+    font-family: var(--f-mono); font-size: 11px;
+    background: transparent; border: 1px solid var(--rule-2); color: var(--ink-2);
+    border-radius: 999px; padding: 4px 10px; cursor: pointer; line-height: 1.4;
+  }
+  .chip[aria-pressed="true"] { background: var(--ink); color: var(--page); border-color: var(--ink); }
+  .ctl-label { font-family: var(--f-mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-right: 2px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 0 18px 14px; font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; flex: none; }
+  .sw-d { background: var(--distill); }
+  .sw-t { background: var(--twelve); }
+  .sw-n { background: var(--div-mid); }
+
+  .chart { width: 100%; height: auto; display: block; overflow: visible; }
+  .chart text { font-family: var(--f-body); }
+  .ax { fill: var(--muted); font-size: 11px; font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+  .ax-b { fill: var(--ink-2); font-size: 11.5px; }
+  .val { fill: var(--ink); font-size: 11.5px; font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+  .grid { stroke: var(--rule); stroke-width: 1; }
+  .base { stroke: var(--rule-2); stroke-width: 1; }
+  .m-d { fill: var(--distill); }
+  .m-t { fill: var(--twelve); }
+  .m-n { fill: var(--div-mid); }
+  .dim { opacity: .16; }
+  .band { fill: var(--distill); opacity: .1; }
+
+  .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  .tip {
+    position: fixed; z-index: 60; pointer-events: none;
+    background: var(--ink); color: var(--page);
+    font-family: var(--f-mono); font-size: 11.5px; line-height: 1.5;
+    padding: 7px 10px; border-radius: 3px; max-width: 250px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.22);
+  }
+  .tip b { font-weight: 600; }
+  .tip .t-sub { color: var(--rule-2); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  table.data { font-family: var(--f-mono); font-size: 12.5px; }
+  th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; min-width: 130px; }
+  td.wide-cell, th.wide-cell { text-align: left; white-space: normal; }
+  thead th {
+    font-family: var(--f-mono); font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--rule-2);
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.pos { color: var(--distill); }
+  td.neg { color: var(--twelve); }
+  tr.rule-top td { border-top: 1px solid var(--rule-2); }
+  .tbl-wrap { padding: 4px 18px 16px; }
+  caption { caption-side: top; text-align: left; font-family: var(--f-mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 0 0 8px; }
+
+  .parity td.cell { text-align: center; font-family: var(--f-mono); font-size: 11.5px; min-width: 96px; }
+  .parity .native { color: var(--ink); }
+  .parity .weak { color: var(--ink-2); }
+  .parity .absent { color: var(--muted); }
+  .parity tr.strict td { background: var(--surface-2); }
+  .parity tr.strict td:first-child { box-shadow: inset 2px 0 0 var(--distill); }
+  .tag {
+    font-family: var(--f-mono); font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase;
+    border: 1px solid var(--rule-2); border-radius: 2px; padding: 1px 5px; color: var(--muted);
+  }
+  .tag.strict { border-color: var(--distill); color: var(--distill); }
+
+  .qcard { display: grid; gap: 18px; }
+  .qhead { font-family: var(--f-mono); font-size: 12px; color: var(--ink-2); display: grid; gap: 4px; }
+  .qhead .q { font-family: var(--f-body); font-size: 16.5px; color: var(--ink); line-height: 1.42; }
+  .qmeta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11px; color: var(--muted); }
+  .ranks { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .rankcol { border: 1px solid var(--rule); border-radius: 3px; padding: 12px 13px; background: var(--page); }
+  .rankcol h4 { margin: 0 0 9px; font-family: var(--f-mono); font-size: 11px; letter-spacing: .09em; text-transform: uppercase; display: flex; align-items: center; gap: 7px; }
+  .rankcol ol { margin: 0; padding: 0; list-style: none; font-family: var(--f-mono); font-size: 11.5px; display: grid; gap: 4px; font-variant-numeric: tabular-nums; }
+  .rankcol li { display: grid; grid-template-columns: 1.5rem 1fr auto; gap: 8px; color: var(--ink-2); }
+  .rankcol li.hit { color: var(--ink); font-weight: 500; }
+  .rankcol li.hit .id::before { content: "★ "; color: var(--distill); }
+  .rankcol li .id { overflow: hidden; text-overflow: ellipsis; }
+  .rankscore { color: var(--muted); }
+  .rankfoot { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--rule); font-family: var(--f-mono); font-size: 11px; color: var(--ink-2); display: grid; gap: 3px; }
+
+  .reveal { margin-top: 4px; }
+  .reveal summary {
+    cursor: pointer; font-family: var(--f-mono); font-size: 11.5px; color: var(--distill);
+    letter-spacing: .04em; list-style: none; padding: 8px 0;
+  }
+  .reveal summary::-webkit-details-marker { display: none; }
+  .reveal summary::before { content: "▸ "; }
+  .reveal[open] summary::before { content: "▾ "; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; margin-block: 24px; }
+  .stat { background: var(--surface); padding: 15px 16px; }
+  .stat .k { font-family: var(--f-mono); font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); margin-bottom: 5px; }
+  .stat .v { font-family: var(--f-body); font-size: 1.62rem; line-height: 1.1; font-weight: 600; letter-spacing: -.01em; }
+  .stat .v.d { color: var(--distill); }
+  .stat .v.t { color: var(--twelve); }
+  .stat .n { font-family: var(--f-mono); font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  footer { border-top: 1px solid var(--rule); margin-top: 44px; padding-block: 28px 56px; font-size: 13.5px; color: var(--ink-2); }
+  footer .cmds { font-family: var(--f-mono); font-size: 12px; background: var(--surface); border: 1px solid var(--rule); border-radius: 3px; padding: 13px 15px; margin: 14px 0; white-space: pre; overflow-x: auto; color: var(--ink); }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+  @media (max-width: 560px) {
+    .fig-body, .controls, .legend, .tbl-wrap { padding-inline: 12px; }
+    .fig-head, figcaption { padding-inline: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="specimen">
+  <div class="inner">
+    <b>Specimen</b>
+    <span>Structural template for the NIAF-Bench write-up. Every number, chart and query on this page is <strong>synthetic placeholder data</strong> — invented to show the shape of the argument. No benchmark has been run; nothing here describes the real performance of Distill or TwelveLabs.</span>
+  </div>
+</div>
+<div id="checks" hidden><div class="inner"></div></div>
+
+<div class="wrap">
+  <header class="masthead">
+    <p class="kicker" id="m-kicker"></p>
+    <h1 id="m-title"></h1>
+    <p class="standfirst" id="m-stand"></p>
+    <div class="byline" id="m-byline"></div>
+  </header>
+</div>
+
+<div class="wrap">
+  <dl class="fingerprint" id="fingerprint"></dl>
+
+  <div class="tldr">
+    <h2>What the run found</h2>
+    <ul>
+      <li data-n="01"><strong>At strict parity, Distill loses.</strong> Restricted to the two signals both systems express natively, Distill trails by <span class="mono" data-v="a-delta"></span> nDCG@10 <span class="mono" data-v="a-ci"></span>, losing <span data-v="a-loss"></span> of <span data-v="n-queries"></span> queries and winning <span data-v="a-win"></span>.</li>
+      <li data-n="02"><strong>At full strength, it wins — narrowly.</strong> With all six legs live, Distill leads by <span class="mono" data-v="b-delta"></span> <span class="mono" data-v="b-ci"></span>. The entire <span class="mono" data-v="dividend-abs"></span> swing between the two arms comes from metadata TwelveLabs was never given.</li>
+      <li data-n="03"><strong>The two systems are blind in opposite places.</strong> Distill owns spoken claims and identity lookups; TwelveLabs owns visual action, objects and "the part where…". Neither ordering is an accident of tuning — it is what each index physically stores.</li>
+    </ul>
+    <p class="repo">Code, query set and judgments → <a href="#reproduce" data-v="repo-link"></a></p>
+  </div>
+</div>
+
+<!-- ============ 1 ============ -->
+<div class="wrap">
+<section id="problem">
+  <h2 class="sec"><span class="num">§1</span> The problem</h2>
+  <p class="lede">Agents increasingly retrieve from personal media libraries. Almost nobody measures whether they find the right thing.</p>
+  <p>The Model Context Protocol made it trivial to hand an agent a search tool over your own files. What it did not do is tell you whether that tool is any good. The retrieval task underneath — short-form, personal, multimodal, and answered at <em>clip</em> granularity rather than document granularity — falls between the existing benchmarks. Video-MME and its successors measure question answering over a video you already have. MVEB and MMEB measure embedding quality in isolation. Neither one measures a system, end to end, answering the question a person actually asks their agent: <em>find me the bit where she does the thing.</em></p>
+  <p>NIAF-Bench measures that. Before the scorecard, one query, with both systems' output shown blind. Decide which list you would rather have been handed.</p>
+</section>
+</div>
+
+<div class="wide">
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Figure 3 · query card</div>
+        <p class="fig-title">One temporal query, end to end</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="fig-body">
+      <div class="qcard">
+        <div class="qhead">
+          <div class="q" id="f3-q"></div>
+          <div class="qmeta" id="f3-meta"></div>
+        </div>
+        <div id="f3-timeline"></div>
+        <div class="ranks">
+          <div class="rankcol">
+            <h4><span class="swatch sw-d"></span>System A</h4>
+            <ol id="f3-list-a"></ol>
+            <div class="rankfoot" id="f3-foot-a"></div>
+          </div>
+          <div class="rankcol">
+            <h4><span class="swatch sw-t"></span>System B</h4>
+            <ol id="f3-list-b"></ol>
+            <div class="rankfoot" id="f3-foot-b"></div>
+          </div>
+        </div>
+        <details class="reveal">
+          <summary>Reveal which system is which, and the score decomposition</summary>
+          <div id="f3-decomp"></div>
+        </details>
+      </div>
+    </div>
+    <figcaption><strong>How to read it.</strong> The timeline shows the annotated gold span against each system's returned clip span; tIoU is their overlap. System A retrieves the right video but places the moment early and ranks it fourth. System B lands it at rank 1 with a tight span. The decomposition, once revealed, shows <em>why</em> — and that the leg carrying the hit is not the one the query's expected signals predicted.</figcaption>
+  </figure>
+</div>
+
+<!-- ============ 2 ============ -->
+<div class="wrap">
+<section id="measures">
+  <h2 class="sec"><span class="num">§2</span> What NIAF-Bench measures</h2>
+
+  <h3><span class="sub">2.1</span> The task</h3>
+  <p>A natural-language query goes in. A ranked list of videos comes out, each optionally carrying a clip span. Every system is reached through one adapter interface — <code>search(query, signals, limit)</code> returning hits with <code>doc_id</code>, <code>rank</code>, <code>score</code>, an optional <code>clip_span</code>, and per-leg evidence. A BM25-on-transcript baseline ships alongside the two real systems to prove the interface is not shaped around either of them.</p>
+
+  <h3><span class="sub">2.2</span> The corpus</h3>
+  <p><span data-v="n-videos"></span> videos, stratified by content category so every slice has enough mass to report. Composition matters as much as size: without near-miss distractors, precision is free and the benchmark flatters everyone.</p>
+</section>
+</div>
+
+<div class="wide">
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Table 1 · corpus</div>
+        <p class="fig-title">Composition, by design</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="tbl-wrap scroll-x"><table class="data" id="t1-table"></table></div>
+    <figcaption>Below 50 videos this is a smoke test and should be labelled as one. 200–500 is where per-bucket nDCG stops swinging on single queries.</figcaption>
+  </figure>
+</div>
+
+<div class="wrap">
+<section>
+  <h3><span class="sub">2.3</span> Query intents</h3>
+  <p>Every query carries an intent bucket and the signals it is <em>expected</em> to need. Expectations are diagnostics — they answer "did the leg we thought would fire actually fire?" They never configure the run.</p>
+  <ul class="body" id="intent-list"></ul>
+
+  <h3><span class="sub">2.4</span> Judging</h3>
+  <p>Top-<em>k</em> from every arm is pooled and the union judged <strong>blind to which system produced it</strong>, graded 0–3: 3 is the video meant, 2 a strong alternative, 1 acceptable, 0 not relevant. Judgments live in their own file keyed <code>(query_id, doc_id)</code>, separate from the query set — so adding an arm surfaces “<span class="mono"><span data-v="unjudged"></span> docs in pool are unjudged</span>” instead of quietly scoring them zero. A 20% sample is double-judged; this run reports <span class="mono">κ = <span data-v="kappa"></span></span>.</p>
+</section>
+</div>
+
+<!-- ============ 3 ============ -->
+<div class="wrap">
+<section id="fair">
+  <h2 class="sec"><span class="num">§3</span> Keeping it fair</h2>
+  <p>The hard part of a two-system comparison is not the metric. It is that the systems are not built the same way, and any naive mapping of one's components onto the other's quietly hands somebody an advantage.</p>
+  <p>NIAF-Bench resolves this with one indirection: arms are declared over abstract <strong>signals</strong>, and each adapter declares how — or whether — it expresses each one. The runner <em>refuses</em> to run a strict-parity arm containing a signal an adapter cannot express, rather than silently dropping it.</p>
+</section>
+</div>
+
+<div class="wide">
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Figure 4 · parity matrix</div>
+        <p class="fig-title">Which signals each system can express</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="tbl-wrap scroll-x"><table class="data parity" id="f4-table"></table></div>
+    <figcaption>Only the shaded rows are expressed natively by both systems. Those signals define <strong>Arm A</strong>, the sole arm from which “system X retrieves better” is a defensible claim.</figcaption>
+  </figure>
+</div>
+
+<div class="wrap">
+<section>
+  <h3><span class="sub">3.1</span> The three arms</h3>
+  <ul class="body">
+    <li><strong>Arm A — strict parity.</strong> <code>visual_action + speech</code> only. Distill runs two of its six legs.</li>
+    <li><strong>Arm B — best foot forward.</strong> Each system at full strength. Answers the product question: which tool finds my clip today.</li>
+    <li><strong>B &minus; A — the delta.</strong> Exactly how much of Distill's standing comes from metadata TwelveLabs was never given. A first-class result, not a footnote.</li>
+  </ul>
+
+  <div class="note"><strong>An asymmetry worth stating up front.</strong> TwelveLabs exposes one audio index; speech and ambient audio cannot be separated through its API. Its Arm A and Arm B configurations are therefore identical, and every TwelveLabs figure on this page is the same number in both arms. The parity restriction binds only on Distill — which, if anything, makes Arm A harsher on Distill than a true parity arm would be.</div>
+
+  <h3><span class="sub">3.2</span> Disclosure</h3>
+  <p><strong>I built Distill.</strong> That is a real conflict and no amount of methodology erases it. What it buys instead: judging is blind to system, every judgment is published keyed to <code>(query_id, doc_id)</code>, the headline claim is taken from the arm where Distill is <em>weakest</em>, and the raw run artifact ships so anyone can rescore it against their own judgments without re-querying either system. If a number here is wrong, it should be cheap to prove.</p>
+</section>
+</div>
+
+<!-- ============ 4 ============ -->
+<div class="wrap">
+<section id="results">
+  <h2 class="sec"><span class="num">§4</span> Results</h2>
+  <h3><span class="sub">4.1</span> Head to head</h3>
+  <p>Two independent averages with no confidence interval is the thing that makes a benchmark unfalsifiable. The honest headline is the <strong>paired</strong> row: per-query Δ, win/loss/tie counts, and an interval.</p>
+</section>
+</div>
+
+<div class="wide">
+  <div class="stats" id="stat-row"></div>
+
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Figure 1 · per-query paired delta</div>
+        <p class="fig-title">Every query, sorted by margin</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="controls">
+      <span class="ctl-label">Arm</span>
+      <div class="seg" role="group" aria-label="Choose arm">
+        <button type="button" id="arm-a" aria-pressed="false">A · strict parity</button>
+        <button type="button" id="arm-b" aria-pressed="true">B · best foot forward</button>
+      </div>
+      <span class="ctl-label" style="margin-left:6px">Isolate bucket</span>
+      <span id="bucket-chips" style="display:flex;flex-wrap:wrap;gap:6px"></span>
+    </div>
+    <div class="legend">
+      <span><i class="swatch sw-d"></i>Distill ranked it higher</span>
+      <span><i class="swatch sw-t"></i>TwelveLabs ranked it higher</span>
+      <span><i class="swatch sw-n"></i>Tie</span>
+      <span style="color:var(--muted)">Shaded band = 95% CI of the mean Δ</span>
+    </div>
+    <div class="fig-body scroll-x"><div id="f1-chart"></div></div>
+    <div class="tbl-wrap scroll-x"><table class="data" id="f1-table"></table></div>
+    <figcaption><strong>The shape of the disagreement.</strong> Neither arm is a landslide — both have long tails on each side. In Arm B the bootstrap interval clears zero while the sign test does not (<span class="mono">p=<span data-v="b-p"></span></span>): Distill wins <em>less often</em> than it loses on count, but its wins are larger, and almost all of that size sits in one bucket. Reading only the mean would miss that; reading only the sign test would too.</figcaption>
+  </figure>
+</div>
+
+<div class="wrap">
+<section>
+  <h3><span class="sub">4.2</span> Where each system is blind</h3>
+  <p>This is where the story actually lives. The aggregate is a tie-ish number sitting on top of two systems that fail in completely different places.</p>
+</section>
+</div>
+
+<div class="wide">
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Figure 2 · intent buckets</div>
+        <p class="fig-title">nDCG@10 by query intent</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="legend">
+      <span><i class="swatch sw-d"></i>Distill</span>
+      <span><i class="swatch sw-t"></i>TwelveLabs</span>
+      <span style="color:var(--muted)">Follows the arm selected on Figure 1</span>
+    </div>
+    <div class="fig-body scroll-x"><div id="f2-chart"></div></div>
+    <div class="tbl-wrap scroll-x"><table class="data" id="f2-table"></table></div>
+    <figcaption><strong>Opposite blindness.</strong> Distill owns anything carried by words — spoken claims, saved-from identity, authored captions. TwelveLabs owns anything carried by pixels in motion — objects, actions, and “the part where…”. Switch to Arm A and Distill's three largest wins collapse down the chart, because the legs producing them are switched off.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Figure 7 · content categories</div>
+        <p class="fig-title">Δ nDCG@10 by what the video is</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="legend">
+      <span><i class="swatch sw-d"></i>Distill ahead</span>
+      <span><i class="swatch sw-t"></i>TwelveLabs ahead</span>
+      <span style="color:var(--muted)">Arm B · n = queries whose gold video is in that category</span>
+    </div>
+    <div class="fig-body scroll-x"><div id="f7-chart"></div></div>
+    <div class="tbl-wrap scroll-x"><table class="data" id="f7-table"></table></div>
+    <figcaption><strong>The second axis.</strong> Not which queries, but which <em>content</em> each system cannot see. Distill's advantage tracks the presence of language: talking-head and text-overlay content at the top, silent and b-roll footage at the bottom, where it has nothing but frames. The worst cell on this page is the clearest instruction for where to spend engineering effort.</figcaption>
+  </figure>
+</div>
+
+<div class="wrap">
+<section>
+  <h3><span class="sub">4.3</span> Finding the moment, not just the video</h3>
+  <p>Document-level retrieval understates both systems, and it is also the wrong unit. Nobody asks an agent for a 40-second video; they ask for the six seconds inside it. On the <span data-v="clip-n"></span> temporally annotated queries, TwelveLabs is not close to beaten:</p>
+</section>
+</div>
+
+<div class="wide">
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Figure 8 · clip localisation</div>
+        <p class="fig-title">Offset from the annotated gold span</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="legend">
+      <span><i class="swatch sw-d"></i>Distill</span>
+      <span><i class="swatch sw-t"></i>TwelveLabs</span>
+      <span style="color:var(--muted)">n = <span data-v="clip-n"></span> · each mark is one query</span>
+    </div>
+    <div class="fig-body scroll-x"><div id="f8-chart"></div></div>
+    <figcaption><strong>tIoU@0.5: <span data-v="tiou-d"></span> vs <span data-v="tiou-t"></span>.</strong> Distill's spans are systematically early — a median <span data-v="off-d"></span> s ahead of the gold start, against <span data-v="off-t"></span> s for TwelveLabs — because its spans are derived from transcript windows, and people narrate an action slightly before they perform it. That is a fixable offset, not a retrieval failure, and it is the highest-value bug this run surfaced.</figcaption>
+  </figure>
+</div>
+
+<div class="wrap">
+<section>
+  <h3><span class="sub">4.4</span> The metadata dividend</h3>
+  <p>The gap between the two arms is not a footnote about configuration. It is the answer to a budget question: should effort go into retrieval quality, or into feeding the managed system more of what it never sees?</p>
+</section>
+</div>
+
+<div class="wide">
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Figure 5 · arm bridge</div>
+        <p class="fig-title">What each Distill-only signal adds, A → B</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="fig-body scroll-x"><div id="f5-chart"></div></div>
+    <div class="tbl-wrap scroll-x"><table class="data" id="f5-table"></table></div>
+    <figcaption><strong><span data-v="dividend"></span> of the gap is metadata, not retrieval.</strong> Most of it is captions and saved-from identity — fields a managed video API could ingest tomorrow if it accepted arbitrary document metadata alongside the media. Read from the other side, this is the strongest argument in the run <em>for</em> TwelveLabs: most of what separates the two systems is data access, not index quality.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Figure 6 · leg marginal value</div>
+        <p class="fig-title">Mean nDCG@10 lost when one leg is removed</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="fig-body scroll-x"><div id="f6-chart"></div></div>
+    <div class="tbl-wrap scroll-x"><table class="data" id="f6-table"></table></div>
+    <figcaption><strong>Free to compute, and it changed a roadmap.</strong> Re-fusing with each leg dropped costs no extra retrieval — the per-leg RRF contributions are already stored on every hit, so this is a re-sum over the artifact. The cheapest leg earns less than its share of index cost and is a deletion candidate. Note that the drops sum to more than <span class="mono" data-v="dividend-abs"></span>: legs overlap, so leave-one-out credit double-counts and is a ranking device, not an additive decomposition.</figcaption>
+  </figure>
+</div>
+
+<div class="wrap">
+<section>
+  <h3><span class="sub">4.5</span> Cost and latency</h3>
+  <p>Measured serially and unloaded, cold and warm reported separately. TwelveLabs bills per indexing-minute; Distill pays for embeddings and storage. That inverts the answer depending on library size and query volume.</p>
+</section>
+</div>
+
+<div class="wide">
+  <figure>
+    <div class="fig-head">
+      <div>
+        <div class="fig-id">Table 2 · operational</div>
+        <p class="fig-title">What each system costs to run</p>
+      </div>
+      <span class="synthetic">synthetic</span>
+    </div>
+    <div class="tbl-wrap scroll-x"><table class="data" id="t2-table"></table></div>
+    <figcaption>TwelveLabs has no cold path to report — it is a managed index. The decision is set by how much video you hold, not how often you search it.</figcaption>
+  </figure>
+</div>
+
+<!-- ============ 5 ============ -->
+<div class="wrap">
+<section id="limits">
+  <h2 class="sec"><span class="num">§5</span> Limitations</h2>
+  <ul class="body">
+    <li><strong>I built one of the two systems.</strong> Stated in §3.2, restated here because it is the limitation that matters most.</li>
+    <li><strong>The corpus is mine.</strong> <span data-v="n-videos"></span> videos from one person's saved feed. Category proportions reflect my viewing, not a population — the per-category deltas in Figure 7 are directional, not estimates.</li>
+    <li><strong>Per-bucket <em>n</em> is <span data-v="bucket-n-range"></span>.</strong> Bucket-level deltas under roughly <span class="mono">0.05</span> should be read as noise. Only the largest few in Figure 2 survive a per-bucket interval.</li>
+    <li><strong><span data-v="unjudged"></span> of <span data-v="pooled"></span> pooled documents are unjudged</strong> (<span data-v="unjudged-pct"></span>) and scored 0, TREC-style. This depresses recall-sensitive metrics for whichever system retrieved more of the unjudged tail — here, TwelveLabs.</li>
+    <li><strong>Ingredient coverage is uneven.</strong> <span data-v="coverage"></span>. Some of Distill's speech-bucket losses are missing transcripts, not bad retrieval; the failure taxonomy in the artifact separates the two.</li>
+    <li><strong>One model version each.</strong> TwelveLabs Marengo as of the run date; Distill at commit <span class="mono" data-v="fingerprint"></span>. Neither number generalises across versions and this page will not be silently updated when they change.</li>
+    <li><strong>Not tested yet:</strong> multi-turn agent sessions, queries requiring two videos, non-English query text, or any library above 1,000 videos.</li>
+  </ul>
+</section>
+
+<!-- ============ 6 ============ -->
+<section id="living">
+  <h2 class="sec"><span class="num">§6</span> A living benchmark</h2>
+  <p>Most video benchmarks stagnate because they ship as a static leaderboard and a paper. NIAF-Bench is versioned <span class="mono" data-v="version"></span> and carries a changelog; every run stamps a fingerprint covering the git SHA, embedding model, index ID, fusion constant and concurrency, so two scorecards are only comparable when their fingerprints say they are.</p>
+  <p>The split that makes this maintainable is <strong>runner ≠ scoring</strong>. Searching is slow and costs money; scoring is a pure function from stored artifact plus judgments to scorecard, with no network and no database. Adding a metric, fixing a judgment, or re-bucketing queries costs nothing and re-queries nobody.</p>
+  <p>Adding a system means implementing one adapter and declaring its capability matrix. The BM25 baseline exists to keep that interface honest. <strong>TwelveLabs is the first system evaluated here, not the benchmark's subject</strong> — if you maintain a video retrieval system and want a row, the adapter is about eighty lines and I will run it.</p>
+</section>
+
+<!-- ============ 7 ============ -->
+<section id="reproduce">
+  <h2 class="sec"><span class="num">§7</span> Reproduce it</h2>
+  <p>Everything on this page comes out of three commands against a published corpus manifest and judgment file.</p>
+</section>
+</div>
+
+<div class="wrap">
+  <footer>
+    <div class="cmds" id="cmds"></div>
+    <p>Raw run artifact, judgments, query set and the scoring code live in the repo. The <span class="mono">compare</span> subcommand diffs against the last archived artifact, so a regression reads as <em>“nDCG@10 &minus;0.04 on spoken-claim, driven by the transcript leg”</em> rather than a number that moved.</p>
+    <p style="color:var(--muted);font-size:12.5px;margin-top:26px;padding-top:18px;border-top:1px solid var(--rule)">
+      <strong>Specimen notice.</strong> This page is a structural template for the NIAF-Bench write-up. All figures, tables, queries, costs and findings are synthetic placeholders generated to demonstrate layout and argument flow. They are not measurements, and they do not describe the behaviour of Distill, TwelveLabs, or any other system.
+    </p>
+  </footer>
+</div>
+
+<script>
+/* ==========================================================================
+   NIAF-BENCH REPORT
+   --------------------------------------------------------------------------
+   EVERYTHING NUMERIC ON THE PAGE COMES FROM THE `DATA` OBJECT BELOW.
+   Nothing else in this file needs touching to publish a real run.
+
+   To swap in real results:
+     1. Replace the values in DATA. Keep the keys and the shapes.
+     2. Reload. Arm aggregates, deltas, stat tiles, every chart and every
+        table view recompute from DATA — they are never hardcoded.
+     3. Check the top of the page. If a red strip appears, a consistency
+        check failed and it names which one. Fix DATA, don't fix the strip.
+     4. Re-read the figcaptions. They carry interpretation, not just
+        numbers, so they are prose on purpose. Captions that quote a figure
+        pull it from DATA via data-v="", but the ARGUMENT in each caption is
+        written for the placeholder result and will need rewriting.
+     5. Delete the `.specimen` bar and the `Specimen notice` paragraph in
+        the footer once the numbers are real.
+
+   DERIVED, NEVER ENTERED BY HAND:
+     arm.distill / arm.twelvelabs  n-weighted means over DATA.buckets
+     arm.delta                     distill − twelvelabs
+     dividend                      armB.distill − armA.distill
+     bridge start / end            armA.distill / armB.distill
+   ENTERED BY HAND (your scorer produces these):
+     arm.ci, arm.win/loss/tie, arm.p, arm.recall, arm.mrr
+   ========================================================================== */
+
+var DATA = {
+
+  /* ---- masthead & run identity ------------------------------------- */
+  meta: {
+    version:  "v0.1",
+    kicker:   "NIAF-Bench · v0.1 · specimen report",
+    title:    "Needle in a Feed: can an agent find the clip?",
+    standfirst: "A maintained benchmark for agent-facing retrieval over personal short-form video. First results: Distill against TwelveLabs on 180 queries over a 240-video corpus.",
+    author:   "Tarun Chinta",
+    date:     "2026-09-21",
+    readTime: "~12 min",
+    repo:     "github.com/tchinta/niaf-bench",
+    repoUrl:  "#reproduce"
+  },
+
+  run: {
+    timestamp:   "2026-09-21T14:02Z",
+    videos:      240,
+    queries:     180,
+    armsLabel:   "A · B · baseline",
+    kappa:       0.71,
+    fingerprint: "4e9c1a7"
+  },
+
+  /* ---- system names: change these and every label follows ---------- */
+  systems: { a: "Distill", b: "TwelveLabs" },
+
+  /* ---- ARMS -------------------------------------------------------- */
+  /* nDCG@10 and delta are COMPUTED from buckets. Supply only the       */
+  /* statistics your scorer emits: CI, counts, p-value, recall, MRR.    */
+  arms: {
+    A: { label: "Arm A · strict parity",
+         ci: [-0.094, -0.032], win: 62, loss: 91, tie: 27, p: "0.023",
+         recallD: 0.648, mrrD: 0.471, recallT: 0.712, mrrT: 0.589 },
+    B: { label: "Arm B · best foot forward",
+         ci: [0.002, 0.060], win: 88, loss: 68, tie: 24, p: "0.11",
+         recallD: 0.731, mrrD: 0.566, recallT: 0.712, mrrT: 0.589 }
+  },
+
+  /* ---- INTENT BUCKETS (Figures 1 & 2) ------------------------------ */
+  /* a = Distill nDCG@10 in Arm A, b = in Arm B, t = TwelveLabs.        */
+  /* `n` must sum to run.queries. `example` feeds the §2.3 list.        */
+  buckets: [
+    { key: "metadata",  label: "metadata / identity",   n: 15, a: 0.243, b: 0.812, t: 0.104,
+      example: "“the reel I saved from Kenji in March”" },
+    { key: "spoken",    label: "spoken-claim / quote",  n: 24, a: 0.774, b: 0.781, t: 0.512,
+      example: "“where he says the 20-minute rule doesn’t apply to bread”" },
+    { key: "aesthetic", label: "aesthetic / colour",    n: 16, a: 0.338, b: 0.593, t: 0.402,
+      example: "“that washed-out green kitchen one”" },
+    { key: "known",     label: "known-item",            n: 20, a: 0.612, b: 0.688, t: 0.641,
+      example: "one specific video the user remembers; MRR is the metric that matters" },
+    { key: "topic",     label: "topic / gist",          n: 22, a: 0.601, b: 0.644, t: 0.598,
+      example: "“videos about cast-iron seasoning”" },
+    { key: "multi",     label: "multi-constraint",      n: 24, a: 0.470, b: 0.521, t: 0.548,
+      example: "“the short outdoor one where he mentions salt”" },
+    { key: "object",    label: "visual-object",         n: 21, a: 0.487, b: 0.498, t: 0.699,
+      example: "“the one with the blue Dutch oven”" },
+    { key: "temporal",  label: "temporal",              n: 18, a: 0.371, b: 0.377, t: 0.681,
+      example: "“the part where the dough finally comes together”" },
+    { key: "action",    label: "visual-action / event", n: 20, a: 0.436, b: 0.441, t: 0.752,
+      example: "“someone flipping a pan one-handed”" }
+  ],
+
+  /* ---- CONTENT CATEGORIES (Figure 7) ------------------------------- */
+  /* d = Δ nDCG@10 (Distill − TwelveLabs) in Arm B. n sums to queries. */
+  categories: [
+    { label: "talking-head",       d:  0.212, n: 24 },
+    { label: "text-overlay-heavy", d:  0.166, n: 20 },
+    { label: "tutorial / how-to",  d:  0.061, n: 22 },
+    { label: "long-form (>3 min)", d:  0.048, n: 12 },
+    { label: "product / unboxing", d: -0.088, n: 18 },
+    { label: "non-English speech", d: -0.133, n: 16 },
+    { label: "performance",        d: -0.174, n: 16 },
+    { label: "fast-cut montage",   d: -0.209, n: 18 },
+    { label: "b-roll / scenery",   d: -0.241, n: 20 },
+    { label: "silent",             d: -0.297, n: 14 }
+  ],
+
+  /* ---- ARM BRIDGE (Figure 5) --------------------------------------- */
+  /* Only the intermediate steps. Start and end are the arm aggregates. */
+  /* Steps must sum to (armB.distill − armA.distill).                   */
+  bridgeSteps: [
+    { label: "+ captions",              value: 0.041 },
+    { label: "+ saved-from / filename", value: 0.038 },
+    { label: "+ colour",                value: 0.015 }
+  ],
+
+  /* ---- LEG MARGINAL VALUE (Figure 6) ------------------------------- */
+  /* v = mean nDCG@10 lost when that leg is removed. Sorted on render.  */
+  legs: [
+    { label: "transcript",      v: 0.118, note: "decisive on 41 queries" },
+    { label: "frame",           v: 0.074, note: "decisive on 26" },
+    { label: "caption",         v: 0.041, note: "decisive on 14" },
+    { label: "text / identity", v: 0.033, note: "decisive on 11" },
+    { label: "colour",          v: 0.014, note: "decisive on 5" },
+    { label: "thumbnail",       v: 0.009, note: "decisive on 2 — deletion candidate" }
+  ],
+
+  /* ---- CLIP LOCALISATION (Figure 8) -------------------------------- */
+  clip: {
+    n: 62,
+    distill:    { tiou: 0.38, medianOffset: 3.4, spread: 2.6 },
+    twelvelabs: { tiou: 0.71, medianOffset: 1.1, spread: 1.5 },
+    axis: { lo: -4, hi: 12 }
+  },
+
+  /* ---- PARITY MATRIX (Figure 4) ------------------------------------ */
+  /* state: "native" | "weak" | "absent". strict:true shades the row.   */
+  parity: {
+    columns: ["Distill", "TwelveLabs", "BM25 baseline"],
+    rows: [
+      { signal: "visual_action", strict: true, verdict: "strict",
+        cells: [["frame","native"], ["visual","native"], ["—","absent"]] },
+      { signal: "speech", strict: true, verdict: "strict",
+        cells: [["transcript","native"], ["audio","native"], ["transcript (lex)","weak"]] },
+      { signal: "visual_static", verdict: "partial",
+        cells: [["thumbnail","native"], ["visual (weak)","weak"], ["—","absent"]] },
+      { signal: "ambient_audio", verdict: "TL only",
+        cells: [["—","absent"], ["audio","native"], ["—","absent"]] },
+      { signal: "authored_text", verdict: "Distill only",
+        cells: [["caption","native"], ["—","absent"], ["—","absent"]] },
+      { signal: "filename / identity", verdict: "Distill only",
+        cells: [["text","native"], ["—","absent"], ["—","absent"]] },
+      { signal: "colour / aesthetic", verdict: "Distill only",
+        cells: [["colour","native"], ["—","absent"], ["—","absent"]] }
+    ]
+  },
+
+  /* ---- TABLE 1 · corpus -------------------------------------------- */
+  corpusTable: [
+    ["Videos in benchmark set", "240", "Intersection of <code>ready</code> across all backends"],
+    ["Median duration",         "0:41", "Short-form; 12% run past 3 min"],
+    ["Content categories",      "10",  "14–24 videos each"],
+    ["Deliberate distractors",  "58",  "Topically adjacent near-misses"],
+    ["Adversarial pairs",       "31",  "Same topic spoken vs shown; silent twins"],
+    ["Queries",                 "180", "9 intent buckets, 15–24 each"],
+    ["Temporally annotated",    "62",  "Gold <code>[start, end]</code> per (query, video)"]
+  ],
+
+  /* ---- TABLE 2 · operational --------------------------------------- */
+  ops: {
+    rows: [
+      { label: "p50 latency · warm", d: "310 ms",   t: "620 ms" },
+      { label: "p95 latency · warm", d: "690 ms",   t: "1,180 ms" },
+      { label: "p50 latency · cold", d: "840 ms",   t: "—" },
+      { label: "p95 latency · cold", d: "2,310 ms", t: "—" },
+      { label: "Cost / 1k queries",  d: "$1.12",    t: "$0.90", ruleAbove: true },
+      { label: "Cost / hour indexed",d: "$0.34",    t: "$2.70" },
+      { label: "Empty-result rate",  d: "1.7%",     t: "0.6%" }
+    ]
+  },
+
+  /* ---- HEALTH & DIAGNOSTICS (§2.4, §5) ----------------------------- */
+  health: {
+    unjudged: 214,
+    pooled:   3247,
+    coverage: "Transcript present on 218/240 videos, caption on 197/240, frames on 240/240"
+  },
+
+  /* ---- FIGURE 3 · the annotated query card ------------------------- */
+  queryCard: {
+    id: "q047",
+    text: "the part where she peels the label off the jar",
+    intent: "temporal",
+    expects: "visual_action + speech",
+    goldDoc: "DX5ktN",
+    goldGain: 3,
+    duration: 34,              // seconds, sets the timeline scale
+    gold: [12, 19],
+    a: { ndcg: 0.42, firstHit: 4, clip: [9, 14], tiou: 0.42,
+         list: [ { id: "DaHOth", score: "0.0743" }, { id: "k2Pq1v", score: "0.0689" },
+                 { id: "mR7dsE", score: "0.0644" }, { id: "DX5ktN", score: "0.0611", hit: true },
+                 { id: "9wLbXc", score: "0.0598" } ] },
+    b: { ndcg: 1.00, firstHit: 1, clip: [11, 20], tiou: 0.78,
+         list: [ { id: "DX5ktN", score: "0.89", hit: true }, { id: "mR7dsE", score: "0.71" },
+                 { id: "Qv3nBa", score: "0.64" }, { id: "DaHOth", score: "0.58" },
+                 { id: "t8Yzrk", score: "0.52" } ] },
+    decomposition: [
+      ["transcript", 0.021], ["frame", 0.016], ["caption", 0.013],
+      ["thumbnail", 0.006], ["text", 0.003], ["colour", 0.002]
+    ],
+    marginalNote: "Drop the transcript leg and the gold video falls from rank 4 to rank 19 — decisive. Drop the frame leg and it moves 4→5 — marginal. Dropping caption, text, colour or thumbnail changes nothing.",
+    diagnosisNote: "The query was tagged <span class='mono'>visual_action + speech</span>, and Distill answered it almost entirely on speech. That mismatch is the diagnostic: the expectation was wrong, or the frame leg underperformed on an action it should have caught. TwelveLabs caught it on visual alone."
+  },
+
+  /* ---- §7 commands ------------------------------------------------- */
+  commands: [
+    "niaf run    --arms A,B --adapters distill,twelvelabs,bm25",
+    "niaf score  runs/2026-09-21T14-02Z.jsonl --judgments judgments/v0.1.jsonl",
+    "niaf report --compare runs/2026-08-30T09-11Z.scored.jsonl"
+  ],
+
+  /* ---- chart render seed (keeps synthetic spreads reproducible) ----- */
+  seed: 20260921
+};
+
+/* ======================= DERIVED AGGREGATES ============================ */
+/* Nothing below here should need editing to publish a real run.           */
+
+(function () {
+  "use strict";
+
+  var D = DATA, S = D.systems;
+
+  function wmean(key) {
+    var num = 0, den = 0;
+    D.buckets.forEach(function (b) { num += b.n * b[key]; den += b.n; });
+    return den ? num / den : 0;
+  }
+
+  var AGG = {
+    A: { distill: wmean("a"), twelvelabs: wmean("t") },
+    B: { distill: wmean("b"), twelvelabs: wmean("t") }
+  };
+  ["A", "B"].forEach(function (k) {
+    AGG[k].delta = AGG[k].distill - AGG[k].twelvelabs;
+    AGG[k].label = D.arms[k].label;
+    AGG[k].ci = D.arms[k].ci;
+    AGG[k].win = D.arms[k].win;
+    AGG[k].loss = D.arms[k].loss;
+    AGG[k].tie = D.arms[k].tie;
+    AGG[k].p = D.arms[k].p;
+  });
+  var DIVIDEND = AGG.B.distill - AGG.A.distill;
+
+  /* ----------------------- consistency checks ------------------------ */
+  var problems = [];
+  function near(x, y, tol) { return Math.abs(x - y) <= tol; }
+
+  var bucketN = D.buckets.reduce(function (s, b) { return s + b.n; }, 0);
+  if (bucketN !== D.run.queries)
+    problems.push("buckets: n sums to " + bucketN + ", run.queries is " + D.run.queries);
+
+  var catN = D.categories.reduce(function (s, c) { return s + c.n; }, 0);
+  if (catN !== D.run.queries)
+    problems.push("categories: n sums to " + catN + ", run.queries is " + D.run.queries);
+
+  var stepSum = D.bridgeSteps.reduce(function (s, b) { return s + b.value; }, 0);
+  if (!near(stepSum, DIVIDEND, 0.002))
+    problems.push("bridgeSteps sum to " + stepSum.toFixed(3) + " but armB − armA is " + DIVIDEND.toFixed(3));
+
+  ["A", "B"].forEach(function (k) {
+    var a = AGG[k];
+    var tot = a.win + a.loss + a.tie;
+    if (tot !== D.run.queries)
+      problems.push("arm " + k + ": win+loss+tie = " + tot + ", run.queries is " + D.run.queries);
+    if (a.delta < a.ci[0] || a.delta > a.ci[1])
+      problems.push("arm " + k + ": computed delta " + a.delta.toFixed(3) + " sits outside its stated CI [" + a.ci.join(", ") + "]");
+  });
+
+  if (problems.length) {
+    var host = document.getElementById("checks");
+    host.hidden = false;
+    host.querySelector(".inner").innerHTML =
+      "<strong>DATA consistency check failed — " + problems.length + " issue" +
+      (problems.length > 1 ? "s" : "") + ".</strong><ul><li>" + problems.join("</li><li>") + "</li></ul>";
+    if (window.console) problems.forEach(function (p) { console.warn("[niaf] " + p); });
+  }
+
+  /* ---------------------------- helpers ------------------------------ */
+  function fmt(v, dp) { dp = dp === undefined ? 3 : dp; return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(dp); }
+  function fmtP(v) { return v.toFixed(3); }
+  function ciStr(ci) { return "[" + fmt(ci[0]) + ", " + fmt(ci[1]) + "]"; }
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  function buildQueries(arm) {
+    var rand = mulberry32(D.seed), out = [];
+    D.buckets.forEach(function (bk) {
+      var mean = (arm === "A" ? bk.a : bk.b) - bk.t, raw = [], i;
+      for (i = 0; i < bk.n; i++) {
+        var spread = 0.30 + Math.abs(mean) * 0.55;
+        raw.push((rand() + rand() + rand() - 1.5) * spread);
+      }
+      var avg = raw.reduce(function (s, v) { return s + v; }, 0) / raw.length;
+      raw.forEach(function (v) {
+        var d = v - avg + mean;
+        if (d > 1) d = 1; if (d < -1) d = -1;
+        if (Math.abs(d) < 0.012) d = 0;
+        out.push({ d: d, bucket: bk.key, label: bk.label, id: "q" + String(out.length + 1).padStart(3, "0") });
+      });
+    });
+    out.sort(function (x, y) { return y.d - x.d; });
+    return out;
+  }
+
+  var tip = null;
+  function showTip(html, evt) {
+    if (!tip) { tip = document.createElement("div"); tip.className = "tip"; document.body.appendChild(tip); }
+    tip.innerHTML = html; tip.style.display = "block";
+    var pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+    var x = evt.clientX + pad, y = evt.clientY + pad;
+    if (x + w > window.innerWidth - 8) x = evt.clientX - w - pad;
+    if (y + h > window.innerHeight - 8) y = evt.clientY - h - pad;
+    tip.style.left = Math.max(8, x) + "px"; tip.style.top = Math.max(8, y) + "px";
+  }
+  function hideTip() { if (tip) tip.style.display = "none"; }
+  document.addEventListener("scroll", hideTip, true);
+
+  function svg(w, h) {
+    var s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    s.setAttribute("viewBox", "0 0 " + w + " " + h);
+    s.setAttribute("class", "chart");
+    s.setAttribute("role", "img");
+    s.style.minWidth = Math.min(w, 560) + "px";
+    return s;
+  }
+  function el(tag, attrs) {
+    var n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (var k in attrs) if (attrs.hasOwnProperty(k)) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function txt(parent, x, y, cls, content, anchor) {
+    var t = el("text", { x: x, y: y, class: cls });
+    if (anchor) t.setAttribute("text-anchor", anchor);
+    t.textContent = content; parent.appendChild(t); return t;
+  }
+
+  /* --------------------- prose value injection ----------------------- */
+  var SLOTS = {
+    "version":        D.meta.version,
+    "repo-link":      D.meta.repo,
+    "n-queries":      D.run.queries,
+    "n-videos":       D.run.videos,
+    "kappa":          D.run.kappa.toFixed(2),
+    "fingerprint":    D.run.fingerprint,
+    "a-delta":        fmt(AGG.A.delta),
+    "a-ci":           ciStr(AGG.A.ci),
+    "a-win":          AGG.A.win,
+    "a-loss":         AGG.A.loss,
+    "b-delta":        fmt(AGG.B.delta),
+    "b-ci":           ciStr(AGG.B.ci),
+    "b-p":            AGG.B.p,
+    "dividend":       fmt(DIVIDEND),
+    "dividend-abs":   Math.abs(DIVIDEND).toFixed(3),
+    "unjudged":       D.health.unjudged,
+    "pooled":         D.health.pooled.toLocaleString("en-US"),
+    "unjudged-pct":   (D.health.unjudged / D.health.pooled * 100).toFixed(1) + "%",
+    "coverage":       D.health.coverage,
+    "clip-n":         D.clip.n,
+    "tiou-d":         D.clip.distill.tiou.toFixed(2),
+    "tiou-t":         D.clip.twelvelabs.tiou.toFixed(2),
+    "off-d":          D.clip.distill.medianOffset.toFixed(1),
+    "off-t":          D.clip.twelvelabs.medianOffset.toFixed(1),
+    "bucket-n-range": (function () {
+      var ns = D.buckets.map(function (b) { return b.n; });
+      return Math.min.apply(null, ns) + "–" + Math.max.apply(null, ns);
+    })()
+  };
+  Object.keys(SLOTS).forEach(function (k) {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-v="' + k + '"]'), function (n) {
+      n.innerHTML = SLOTS[k];
+    });
+  });
+  document.querySelector('[data-v="repo-link"]').setAttribute("href", D.meta.repoUrl);
+
+  /* --------------------------- masthead ------------------------------ */
+  document.getElementById("m-kicker").textContent = D.meta.kicker;
+  document.getElementById("m-title").textContent = D.meta.title;
+  document.getElementById("m-stand").textContent = D.meta.standfirst;
+  document.getElementById("m-byline").innerHTML =
+    [D.meta.author, D.meta.date, D.meta.readTime].join("</span><span>·</span><span>")
+      .replace(/^/, "<span>").replace(/$/, "</span>");
+
+  document.getElementById("fingerprint").innerHTML = [
+    ["Run", D.run.timestamp], ["Corpus", D.run.videos + " videos"],
+    ["Queries", D.run.queries], ["Arms", D.run.armsLabel],
+    ["Judge κ", D.run.kappa.toFixed(2)], ["Fingerprint", D.run.fingerprint]
+  ].map(function (r) { return "<div><dt>" + r[0] + "</dt><dd>" + r[1] + "</dd></div>"; }).join("");
+
+  document.getElementById("cmds").textContent = D.commands.join("\n");
+
+  /* ------------------------- static tables ---------------------------- */
+  document.getElementById("t1-table").innerHTML =
+    "<thead><tr><th>Property</th><th>Value</th><th class='wide-cell'>Why</th></tr></thead><tbody>" +
+    D.corpusTable.map(function (r) {
+      return "<tr><td>" + r[0] + "</td><td>" + r[1] + "</td><td class='wide-cell'>" + r[2] + "</td></tr>";
+    }).join("") + "</tbody>";
+
+  document.getElementById("t2-table").innerHTML =
+    "<thead><tr><th>Measure</th><th>" + S.a + "</th><th>" + S.b + "</th></tr></thead><tbody>" +
+    D.ops.rows.map(function (r) {
+      return "<tr" + (r.ruleAbove ? " class='rule-top'" : "") + "><td>" + r.label +
+        "</td><td>" + r.d + "</td><td>" + r.t + "</td></tr>";
+    }).join("") + "</tbody>";
+
+  document.getElementById("f4-table").innerHTML =
+    "<thead><tr><th>Signal</th>" +
+    D.parity.columns.map(function (c) { return "<th class='cell'>" + c + "</th>"; }).join("") +
+    "<th>Parity</th></tr></thead><tbody>" +
+    D.parity.rows.map(function (r) {
+      return "<tr" + (r.strict ? " class='strict'" : "") + "><td>" + r.signal + "</td>" +
+        r.cells.map(function (c) { return "<td class='cell " + c[1] + "'>" + c[0] + "</td>"; }).join("") +
+        "<td><span class='tag" + (r.strict ? " strict" : "") + "'>" + r.verdict + "</span></td></tr>";
+    }).join("") + "</tbody>";
+
+  document.getElementById("intent-list").innerHTML = D.buckets.map(function (b) {
+    return "<li><strong>" + b.label + "</strong> — " + b.example + "</li>";
+  }).join("");
+
+  document.getElementById("stat-row").innerHTML = [
+    { k: "Arm A · paired Δ", v: fmt(AGG.A.delta), cls: AGG.A.delta > 0 ? "d" : "t",
+      n: ciStr(AGG.A.ci) + " · p=" + AGG.A.p },
+    { k: "Arm B · paired Δ", v: fmt(AGG.B.delta), cls: AGG.B.delta > 0 ? "d" : "t",
+      n: ciStr(AGG.B.ci) + " · p=" + AGG.B.p },
+    { k: "B − A · " + S.a, v: fmt(DIVIDEND), cls: DIVIDEND > 0 ? "d" : "t",
+      n: "the metadata dividend" },
+    { k: "Clip accuracy · tIoU@0.5", v: D.clip.twelvelabs.tiou.toFixed(2), cls: "t",
+      n: S.b + " vs " + D.clip.distill.tiou.toFixed(2) + " " + S.a }
+  ].map(function (s) {
+    return "<div class='stat'><div class='k'>" + s.k + "</div><div class='v " + s.cls + "'>" +
+      s.v + "</div><div class='n'>" + s.n + "</div></div>";
+  }).join("");
+
+  /* ------------------------------ state ------------------------------ */
+  var state = { arm: "B", bucket: null };
+
+  /* ============================ FIGURE 1 ============================ */
+  function drawF1() {
+    var host = document.getElementById("f1-chart"); host.innerHTML = "";
+    var qs = buildQueries(state.arm), A = AGG[state.arm];
+    var W = 920, H = 340, mL = 46, mR = 14, mT = 16, mB = 42;
+    var pw = W - mL - mR, ph = H - mT - mB;
+    var s = svg(W, H), y0 = mT + ph / 2;
+    var ys = function (v) { return y0 - v * (ph / 2); };
+
+    [-1, -0.5, 0.5, 1].forEach(function (g) {
+      s.appendChild(el("line", { x1: mL, x2: mL + pw, y1: ys(g), y2: ys(g), class: "grid" }));
+      txt(s, mL - 8, ys(g) + 4, "ax", fmt(g, 1), "end");
+    });
+
+    s.appendChild(el("rect", { x: mL, y: ys(A.ci[1]), width: pw,
+      height: Math.max(2, ys(A.ci[0]) - ys(A.ci[1])), class: "band" }));
+
+    var bw = pw / qs.length;
+    qs.forEach(function (q, i) {
+      var cls = q.d > 0 ? "m-d" : (q.d < 0 ? "m-t" : "m-n");
+      if (state.bucket && q.bucket !== state.bucket) cls += " dim";
+      var hgt = q.d === 0 ? 2 : Math.abs(q.d) * (ph / 2);
+      var r = el("rect", { x: mL + i * bw, y: q.d >= 0 ? ys(q.d) : y0,
+        width: Math.max(1.2, bw - 0.9), height: Math.max(1.5, hgt), class: cls, rx: 0.8 });
+      r.addEventListener("mousemove", function (e) {
+        showTip("<b>" + q.id + "</b> &nbsp;" + fmt(q.d) + "<br><span class='t-sub'>" + q.label + "</span>", e);
+      });
+      r.addEventListener("mouseleave", hideTip);
+      s.appendChild(r);
+    });
+
+    s.appendChild(el("line", { x1: mL, x2: mL + pw, y1: y0, y2: y0, class: "base" }));
+    s.appendChild(el("line", { x1: mL, x2: mL + pw, y1: ys(A.delta), y2: ys(A.delta),
+      stroke: "var(--ink)", "stroke-width": 1.5 }));
+    txt(s, mL + pw, ys(A.delta) + (A.delta >= 0 ? -8 : 15), "val", "mean " + fmt(A.delta), "end");
+
+    txt(s, mL + pw * 0.985, mT + 12, "ax-b", "▲ " + S.a + " ahead", "end")
+      .setAttribute("fill", "var(--distill)");
+    txt(s, mL + pw * 0.015, mT + ph - 2, "ax-b", "▼ " + S.b + " ahead")
+      .setAttribute("fill", "var(--twelve)");
+
+    txt(s, mL + pw / 2, H - 12, "ax",
+      D.run.queries + " queries, sorted by Δ nDCG@10 · " + A.label, "middle");
+    txt(s, 12, y0, "ax", "Δ nDCG@10", "middle")
+      .setAttribute("transform", "rotate(-90 12 " + y0 + ")");
+
+    host.appendChild(s);
+
+    var counts = {};
+    qs.forEach(function (q) {
+      if (!counts[q.bucket]) counts[q.bucket] = { w: 0, l: 0, t: 0 };
+      if (q.d > 0) counts[q.bucket].w++; else if (q.d < 0) counts[q.bucket].l++; else counts[q.bucket].t++;
+    });
+    document.getElementById("f1-table").innerHTML =
+      "<caption>Table view — " + A.label + "</caption><thead><tr><th>Intent bucket</th><th>n</th><th>" +
+      S.a + " win</th><th>loss</th><th>tie</th><th>mean Δ</th></tr></thead><tbody>" +
+      D.buckets.map(function (bk) {
+        var c = counts[bk.key] || { w: 0, l: 0, t: 0 };
+        var dd = (state.arm === "A" ? bk.a : bk.b) - bk.t;
+        return "<tr><td>" + bk.label + "</td><td>" + bk.n + "</td><td>" + c.w + "</td><td>" + c.l +
+          "</td><td>" + c.t + "</td><td class='" + (dd > 0 ? "pos" : "neg") + "'>" + fmt(dd) + "</td></tr>";
+      }).join("") +
+      "<tr class='rule-top'><td><strong>All queries</strong></td><td>" + D.run.queries + "</td><td>" +
+      A.win + "</td><td>" + A.loss + "</td><td>" + A.tie + "</td><td class='" +
+      (A.delta > 0 ? "pos" : "neg") + "'>" + fmt(A.delta) + "</td></tr></tbody>";
+  }
+
+  /* ============================ FIGURE 2 ============================ */
+  function drawF2() {
+    var host = document.getElementById("f2-chart"); host.innerHTML = "";
+    var key = state.arm === "A" ? "a" : "b";
+    var rows = D.buckets.slice().sort(function (x, y) { return (y[key] - y.t) - (x[key] - x.t); });
+    var W = 880, rowH = 34, mL = 186, mR = 74, mT = 28, mB = 34;
+    var H = mT + rows.length * rowH + mB, pw = W - mL - mR;
+    var s = svg(W, H), xs = function (v) { return mL + v * pw; };
+
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (g) {
+      s.appendChild(el("line", { x1: xs(g), x2: xs(g), y1: mT - 8, y2: mT + rows.length * rowH, class: "grid" }));
+      txt(s, xs(g), mT - 14, "ax", g.toFixed(2), "middle");
+    });
+
+    rows.forEach(function (bk, i) {
+      var y = mT + i * rowH + rowH / 2, dv = bk[key], tv = bk.t, delta = dv - tv;
+      txt(s, mL - 14, y + 4, "ax-b", bk.label, "end");
+      txt(s, mL - 14, y + 16, "ax", "n=" + bk.n, "end").setAttribute("font-size", "10");
+      s.appendChild(el("line", { x1: xs(Math.min(dv, tv)), x2: xs(Math.max(dv, tv)), y1: y, y2: y,
+        stroke: "var(--rule-2)", "stroke-width": 2 }));
+      s.appendChild(el("circle", { cx: xs(tv), cy: y, r: 6, class: "m-t", stroke: "var(--surface)", "stroke-width": 2 }));
+      s.appendChild(el("circle", { cx: xs(dv), cy: y, r: 6, class: "m-d", stroke: "var(--surface)", "stroke-width": 2 }));
+      txt(s, W - mR + 12, y + 4, "val", fmt(delta), "start")
+        .setAttribute("fill", delta > 0 ? "var(--distill)" : "var(--twelve)");
+
+      var hit = el("rect", { x: mL, y: y - rowH / 2, width: pw, height: rowH, fill: "transparent" });
+      hit.addEventListener("mousemove", function (e) {
+        showTip("<b>" + bk.label + "</b><br>" + S.a + " " + fmtP(dv) + " &nbsp; " + S.b + " " + fmtP(tv) +
+          "<br><span class='t-sub'>Δ " + fmt(delta) + " · n=" + bk.n + "</span>", e);
+      });
+      hit.addEventListener("mouseleave", hideTip);
+      s.appendChild(hit);
+    });
+
+    txt(s, mL + pw / 2, H - 8, "ax", "nDCG@10 · " + AGG[state.arm].label, "middle");
+    host.appendChild(s);
+
+    document.getElementById("f2-table").innerHTML =
+      "<caption>Table view — " + AGG[state.arm].label + "</caption><thead><tr><th>Intent bucket</th><th>n</th><th>" +
+      S.a + "</th><th>" + S.b + "</th><th>Δ</th></tr></thead><tbody>" +
+      rows.map(function (bk) {
+        var dd = bk[key] - bk.t;
+        return "<tr><td>" + bk.label + "</td><td>" + bk.n + "</td><td>" + fmtP(bk[key]) + "</td><td>" +
+          fmtP(bk.t) + "</td><td class='" + (dd > 0 ? "pos" : "neg") + "'>" + fmt(dd) + "</td></tr>";
+      }).join("") + "</tbody>";
+  }
+
+  /* ============================ FIGURE 7 ============================ */
+  function drawF7() {
+    var host = document.getElementById("f7-chart"); host.innerHTML = "";
+    var cats = D.categories.slice().sort(function (a, b) { return b.d - a.d; });
+    var W = 880, rowH = 30, mL = 176, mR = 66, mT = 28, mB = 32;
+    var H = mT + cats.length * rowH + mB, pw = W - mL - mR, mid = mL + pw / 2;
+    var peak = Math.max.apply(null, cats.map(function (c) { return Math.abs(c.d); }));
+    var max = Math.ceil(peak * 10.5) / 10;
+    var s = svg(W, H), xs = function (v) { return mid + (v / max) * (pw / 2); };
+
+    [-max, -max / 2, 0, max / 2, max].forEach(function (g) {
+      s.appendChild(el("line", { x1: xs(g), x2: xs(g), y1: mT - 8, y2: mT + cats.length * rowH,
+        class: g === 0 ? "base" : "grid" }));
+      txt(s, xs(g), mT - 14, "ax", fmt(g, 2), "middle");
+    });
+
+    cats.forEach(function (c, i) {
+      var y = mT + i * rowH + rowH / 2;
+      txt(s, mL - 14, y + 4, "ax-b", c.label, "end");
+      var x1 = xs(Math.min(0, c.d)), x2 = xs(Math.max(0, c.d));
+      s.appendChild(el("rect", { x: x1, y: y - 8, width: Math.max(2, x2 - x1), height: 16,
+        class: c.d > 0 ? "m-d" : "m-t", rx: 2 }));
+      txt(s, c.d > 0 ? x2 + 9 : x1 - 9, y + 4, "val", fmt(c.d, 3), c.d > 0 ? "start" : "end");
+      txt(s, W - 6, y + 4, "ax", "n=" + c.n, "end");
+
+      var hit = el("rect", { x: mL, y: y - rowH / 2, width: pw, height: rowH, fill: "transparent" });
+      hit.addEventListener("mousemove", function (e) {
+        showTip("<b>" + c.label + "</b><br>Δ " + fmt(c.d) + "<br><span class='t-sub'>n=" + c.n + " queries</span>", e);
+      });
+      hit.addEventListener("mouseleave", hideTip);
+      s.appendChild(hit);
+    });
+
+    txt(s, mid, H - 8, "ax", "Δ nDCG@10 (" + S.a + " − " + S.b + ") · Arm B", "middle");
+    host.appendChild(s);
+
+    document.getElementById("f7-table").innerHTML =
+      "<caption>Table view — content category, Arm B</caption><thead><tr><th>Category</th><th>n</th><th>Δ nDCG@10</th></tr></thead><tbody>" +
+      cats.map(function (c) {
+        return "<tr><td>" + c.label + "</td><td>" + c.n + "</td><td class='" +
+          (c.d > 0 ? "pos" : "neg") + "'>" + fmt(c.d) + "</td></tr>";
+      }).join("") + "</tbody>";
+  }
+
+  /* ============================ FIGURE 5 ============================ */
+  function drawF5() {
+    var host = document.getElementById("f5-chart"); host.innerHTML = "";
+    var bars = [{ label: "Arm A", type: "total", value: AGG.A.distill }]
+      .concat(D.bridgeSteps.map(function (b) { return { label: b.label, type: "step", value: b.value }; }))
+      .concat([{ label: "Arm B", type: "total", value: AGG.B.distill }]);
+
+    var W = 820, H = 300, mL = 52, mR = 18, mT = 26, mB = 62;
+    var pw = W - mL - mR, ph = H - mT - mB;
+    var lo = Math.floor((AGG.A.distill - 0.06) * 20) / 20;
+    var hi = Math.ceil((AGG.B.distill + 0.05) * 20) / 20;
+    var ys = function (v) { return mT + ph - ((v - lo) / (hi - lo)) * ph; };
+    var s = svg(W, H);
+
+    var ticks = [], tv;
+    for (tv = lo; tv <= hi + 1e-9; tv += 0.05) ticks.push(Math.round(tv * 100) / 100);
+    ticks.forEach(function (g) {
+      s.appendChild(el("line", { x1: mL, x2: mL + pw, y1: ys(g), y2: ys(g), class: "grid" }));
+      txt(s, mL - 8, ys(g) + 4, "ax", g.toFixed(2), "end");
+    });
+
+    var slot = pw / bars.length, bw = Math.min(88, slot * 0.54), run = 0;
+    bars.forEach(function (b, i) {
+      var cx = mL + slot * (i + 0.5), x = cx - bw / 2, top, h, cls;
+      if (b.type === "total") { top = ys(b.value); h = mT + ph - top; cls = "m-n"; run = b.value; }
+      else { top = ys(run + b.value); h = Math.max(3, ys(run) - ys(run + b.value)); cls = "m-d"; run += b.value; }
+
+      s.appendChild(el("rect", { x: x, y: top, width: bw, height: Math.max(3, h), class: cls, rx: 2 }));
+      if (i > 0) s.appendChild(el("line", { x1: mL + slot * (i - 0.5) + bw / 2, x2: x,
+        y1: ys(run), y2: ys(run), stroke: "var(--rule-2)", "stroke-width": 1 }));
+
+      var v = txt(s, cx, top - 9, "val", b.type === "total" ? fmtP(b.value) : fmt(b.value), "middle");
+      if (b.type === "step") v.setAttribute("fill", "var(--distill)");
+
+      var words = b.label.split(" ");
+      if (b.type === "total" || words.length <= 2) txt(s, cx, mT + ph + 20, "ax", b.label, "middle");
+      else {
+        txt(s, cx, mT + ph + 20, "ax", words.slice(0, 2).join(" "), "middle");
+        txt(s, cx, mT + ph + 34, "ax", words.slice(2).join(" "), "middle");
+      }
+    });
+
+    s.appendChild(el("line", { x1: mL, x2: mL + pw, y1: mT + ph, y2: mT + ph, class: "base" }));
+    txt(s, 14, mT + ph / 2, "ax", "nDCG@10", "middle")
+      .setAttribute("transform", "rotate(-90 14 " + (mT + ph / 2) + ")");
+    txt(s, mL, H - 12, "ax", S.a + " only · " + S.b + " is " + fmtP(AGG.B.twelvelabs) + " in both arms");
+    host.appendChild(s);
+
+    var r = 0;
+    document.getElementById("f5-table").innerHTML =
+      "<caption>Table view — arm bridge</caption><thead><tr><th>Step</th><th>Contribution</th><th>Running nDCG@10</th></tr></thead><tbody>" +
+      bars.map(function (b) {
+        if (b.type === "total") { r = b.value; return "<tr><td><strong>" + b.label + "</strong></td><td>—</td><td>" + fmtP(r) + "</td></tr>"; }
+        r += b.value;
+        return "<tr><td>" + b.label + "</td><td class='pos'>" + fmt(b.value) + "</td><td>" + fmtP(r) + "</td></tr>";
+      }).join("") + "</tbody>";
+  }
+
+  /* ============================ FIGURE 6 ============================ */
+  function drawF6() {
+    var host = document.getElementById("f6-chart"); host.innerHTML = "";
+    var legs = D.legs.slice().sort(function (a, b) { return b.v - a.v; });
+    var W = 820, rowH = 34, mL = 148, mR = 200, mT = 24, mB = 34;
+    var H = mT + legs.length * rowH + mB, pw = W - mL - mR;
+    var max = Math.ceil(legs[0].v * 11) / 100 * 1.0;
+    if (max <= legs[0].v) max = legs[0].v * 1.12;
+    var s = svg(W, H), xs = function (v) { return mL + (v / max) * pw; };
+
+    var step = max / 3, i;
+    for (i = 0; i <= 3; i++) {
+      var g = Math.round(step * i * 1000) / 1000;
+      s.appendChild(el("line", { x1: xs(g), x2: xs(g), y1: mT - 8, y2: mT + legs.length * rowH,
+        class: g === 0 ? "base" : "grid" }));
+      txt(s, xs(g), mT - 14, "ax", (g === 0 ? "" : "−") + g.toFixed(2), "middle");
+    }
+
+    legs.forEach(function (lg, j) {
+      var y = mT + j * rowH + rowH / 2;
+      txt(s, mL - 14, y + 4, "ax-b", lg.label, "end");
+      s.appendChild(el("rect", { x: mL, y: y - 8, width: Math.max(2, xs(lg.v) - mL), height: 16, class: "m-d", rx: 2 }));
+      txt(s, xs(lg.v) + 10, y + 4, "val", "−" + lg.v.toFixed(3));
+      txt(s, xs(lg.v) + 66, y + 4, "ax", lg.note);
+    });
+
+    txt(s, mL + pw / 2, H - 8, "ax",
+      "mean nDCG@10 lost when the leg is removed · Arm B, all " + D.run.queries + " queries", "middle");
+    host.appendChild(s);
+
+    document.getElementById("f6-table").innerHTML =
+      "<caption>Table view — leave-one-out leg value</caption><thead><tr><th>Leg</th><th>Mean Δ nDCG@10</th><th class='wide-cell'>Note</th></tr></thead><tbody>" +
+      legs.map(function (lg) {
+        return "<tr><td>" + lg.label + "</td><td class='neg'>−" + lg.v.toFixed(3) +
+          "</td><td style='text-align:right'>" + lg.note + "</td></tr>";
+      }).join("") + "</tbody>";
+  }
+
+  /* ============================ FIGURE 8 ============================ */
+  function drawF8() {
+    var host = document.getElementById("f8-chart"); host.innerHTML = "";
+    var rand = mulberry32(D.seed + 1);
+    function series(cfg, n) {
+      var out = [], i;
+      for (i = 0; i < n; i++) {
+        var u = rand() + rand() + rand() - 1.5;
+        out.push(cfg.medianOffset + u * cfg.spread + (rand() - 0.5) * cfg.spread * 0.6);
+      }
+      return out;
+    }
+    var W = 820, H = 210, mL = 108, mR = 24, mT = 30;
+    var pw = W - mL - mR, lo = D.clip.axis.lo, hi = D.clip.axis.hi;
+    var xs = function (v) { return mL + ((v - lo) / (hi - lo)) * pw; };
+    var s = svg(W, H);
+
+    var stepT = (hi - lo) / 4, k;
+    for (k = 0; k <= 4; k++) {
+      var g = lo + stepT * k;
+      s.appendChild(el("line", { x1: xs(g), x2: xs(g), y1: mT - 10, y2: mT + 96, class: g === 0 ? "base" : "grid" }));
+      txt(s, xs(g), mT - 16, "ax", (g > 0 ? "+" : "") + g + "s", "middle");
+    }
+
+    function strip(pts, y, cls, name, median) {
+      txt(s, mL - 16, y + 4, "ax-b", name, "end");
+      pts.forEach(function (p, i) {
+        s.appendChild(el("circle", { cx: xs(p), cy: y + ((i % 7) - 3) * 3.1, r: 3.2, class: cls,
+          opacity: .55, stroke: "var(--surface)", "stroke-width": 1 }));
+      });
+      s.appendChild(el("line", { x1: xs(median), x2: xs(median), y1: y - 17, y2: y + 17,
+        stroke: "var(--ink)", "stroke-width": 2 }));
+      txt(s, xs(median), y - 23, "val", "med " + median.toFixed(1) + "s", "middle");
+    }
+    strip(series(D.clip.distill, D.clip.n), mT + 22, "m-d", S.a, D.clip.distill.medianOffset);
+    strip(series(D.clip.twelvelabs, D.clip.n), mT + 78, "m-t", S.b, D.clip.twelvelabs.medianOffset);
+
+    txt(s, mL + pw / 2, H - 10, "ax", "offset of returned clip start from gold start · negative = early", "middle");
+    host.appendChild(s);
+  }
+
+  /* ============================ FIGURE 3 ============================ */
+  function drawF3() {
+    var q = D.queryCard;
+    document.getElementById("f3-q").textContent = "“" + q.text + "”";
+    document.getElementById("f3-meta").innerHTML =
+      ["<span>" + q.id + "</span>", "<span>intent: " + q.intent + "</span>",
+       "<span>expects: " + q.expects + "</span>",
+       "<span>gold: " + q.goldDoc + " (gain " + q.goldGain + ") @ " + tc(q.gold[0]) + "–" + tc(q.gold[1]) + "</span>"].join("");
+
+    function tcLocal(t) { return tc(t); }
+    var W = 820, H = 122, mL = 92, mR = 22, mT = 20;
+    var pw = W - mL - mR, dur = q.duration;
+    var xs = function (t) { return mL + (t / dur) * pw; };
+    var s = svg(W, H), t;
+
+    for (t = 0; t <= dur; t += 5) {
+      s.appendChild(el("line", { x1: xs(t), x2: xs(t), y1: mT - 8, y2: H - 26, class: "grid" }));
+      txt(s, xs(t), H - 10, "ax", tcLocal(t), "middle");
+    }
+    function row(y, label, span, cls, extra) {
+      txt(s, mL - 14, y + 5, "ax-b", label, "end");
+      s.appendChild(el("rect", { x: xs(span[0]), y: y - 8, width: xs(span[1]) - xs(span[0]),
+        height: 17, class: cls, rx: 2 }));
+      if (extra) txt(s, xs(span[1]) + 10, y + 5, "ax", extra);
+    }
+    row(mT + 4, "gold span", q.gold, "m-n", tcLocal(q.gold[0]) + "–" + tcLocal(q.gold[1]));
+    row(mT + 34, "System A", q.a.clip, "m-d", "tIoU " + q.a.tiou.toFixed(2));
+    row(mT + 64, "System B", q.b.clip, "m-t", "tIoU " + q.b.tiou.toFixed(2));
+    var host = document.getElementById("f3-timeline"); host.innerHTML = ""; host.appendChild(s);
+
+    function renderList(id, arr) {
+      document.getElementById(id).innerHTML = arr.map(function (r, i) {
+        return "<li class='" + (r.hit ? "hit" : "") + "'><span>" + (i + 1) + "</span><span class='id'>" +
+          r.id + "</span><span class='rankscore'>" + r.score + "</span></li>";
+      }).join("");
+    }
+    renderList("f3-list-a", q.a.list);
+    renderList("f3-list-b", q.b.list);
+    function foot(side) {
+      return "nDCG@10 &nbsp;" + side.ndcg.toFixed(2) + "<br>first hit @ rank " + side.firstHit +
+        "<br>clip " + tcLocal(side.clip[0]) + "–" + tcLocal(side.clip[1]);
+    }
+    document.getElementById("f3-foot-a").innerHTML = foot(q.a);
+    document.getElementById("f3-foot-b").innerHTML = foot(q.b);
+
+    var total = q.decomposition.reduce(function (s2, r) { return s2 + r[1]; }, 0);
+    document.getElementById("f3-decomp").innerHTML =
+      "<p style='font-size:14px;margin:6px 0 14px'><strong>System A is " + S.a + "; System B is " + S.b +
+      ".</strong> " + S.a + "'s score for the gold video decomposes across " + q.decomposition.length + " legs:</p>" +
+      "<div class='scroll-x'><table class='data'><thead><tr><th>Leg</th><th>RRF contribution</th><th>Share</th></tr></thead><tbody>" +
+      q.decomposition.map(function (r) {
+        return "<tr><td>" + r[0] + "</td><td>" + r[1].toFixed(3) + "</td><td>" +
+          Math.round(r[1] / total * 100) + "%</td></tr>";
+      }).join("") +
+      "<tr class='rule-top'><td><strong>total</strong></td><td>" + total.toFixed(3) + "</td><td>100%</td></tr></tbody></table></div>" +
+      "<p style='font-size:14px;margin:14px 0 4px'><strong>Leg marginal value for this query.</strong> " + q.marginalNote + "</p>" +
+      "<p style='font-size:14px;margin:0'>" + q.diagnosisNote + "</p>";
+  }
+  function tc(sec) {
+    var m = Math.floor(sec / 60), s2 = Math.round(sec % 60);
+    return m + ":" + String(s2).padStart(2, "0");
+  }
+
+  /* ---------------------------- controls ----------------------------- */
+  function syncArm() {
+    document.getElementById("arm-a").setAttribute("aria-pressed", state.arm === "A" ? "true" : "false");
+    document.getElementById("arm-b").setAttribute("aria-pressed", state.arm === "B" ? "true" : "false");
+  }
+  document.getElementById("arm-a").addEventListener("click", function () { state.arm = "A"; syncArm(); drawF1(); drawF2(); });
+  document.getElementById("arm-b").addEventListener("click", function () { state.arm = "B"; syncArm(); drawF1(); drawF2(); });
+
+  var chipHost = document.getElementById("bucket-chips");
+  D.buckets.slice().sort(function (a, b) { return a.label.localeCompare(b.label); }).forEach(function (bk) {
+    var btn = document.createElement("button");
+    btn.type = "button"; btn.className = "chip"; btn.textContent = bk.label;
+    btn.setAttribute("aria-pressed", "false");
+    btn.addEventListener("click", function () {
+      state.bucket = state.bucket === bk.key ? null : bk.key;
+      Array.prototype.forEach.call(chipHost.children, function (c) { c.setAttribute("aria-pressed", "false"); });
+      if (state.bucket) btn.setAttribute("aria-pressed", "true");
+      drawF1();
+    });
+    chipHost.appendChild(btn);
+  });
+
+  drawF3(); drawF1(); drawF2(); drawF7(); drawF5(); drawF6(); drawF8();
+})();
+</script>
+</body>
+</html>
